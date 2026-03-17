@@ -4,8 +4,6 @@
 
 <img width="393" alt="image" src="https://github.com/user-attachments/assets/c749587c-277e-4789-8667-67e94121b97c" />
 
-# t2t
-
 ## 概要
 t2t は、C++ / Win32 API / Direct2D を用いてフルスクラッチで開発された、Windows向けの超軽量なテキストベースWebブラウザです。
 HTMLからテキスト、リンク、基本的なフォーム要素のみを抽出し、DirectWriteによる高速かつ美麗なテキストレンダリングで画面に描画します。マウス操作だけでなく、Vimライクなキーボード操作にも対応しており、余計な装飾を省いたストイックな情報収集に最適化されています。
