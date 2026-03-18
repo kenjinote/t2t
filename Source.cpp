@@ -84,6 +84,7 @@ std::mutex g_ContentMutex;
 float g_ScrollY = 0.0f;
 float g_MaxScrollY = 0.0f;
 std::atomic<bool> g_AppRunning{ true };
+std::atomic<int> g_LoadEpoch{ 0 };
 UINT32 g_SelectionAnchor = UINT32_MAX;
 UINT32 g_SelectionStart = 0;
 UINT32 g_SelectionLength = 0;
@@ -589,19 +590,24 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
 }
 
 // ★ 変更: postData 引数を追加
-void LoadUrlAsync(HWND hwnd, const std::string& url, const std::string& postData = "") {
-    std::thread([hwnd, url, postData]() {
+void LoadUrlAsync(HWND hwnd, const std::string& url, const std::string& postData, int epoch) {
+    std::thread([hwnd, url, postData, epoch]() {
         ParsedPage* page = new ParsedPage(FetchAndStripHTML(url, postData));
-        if (!g_AppRunning) {
+
+        // ★ 変更: アプリ終了時、または新しいロードが既に始まっている場合は破棄
+        if (!g_AppRunning || epoch != g_LoadEpoch.load()) {
             delete page;
             return;
         }
+
         PostMessage(hwnd, WM_CONTENT_LOADED, (WPARAM)page, 0);
         }).detach();
 }
 
 // ★ 変更: postData 引数を追加
 void TriggerLoad(HWND hwnd, const std::string& url, const std::string& postData = "") {
+    int currentEpoch = ++g_LoadEpoch; // ★ 追加: 新しいロード処理の世代を発行
+
     {
         std::lock_guard<std::mutex> lock(g_ContentMutex);
         for (auto& input : g_Inputs) {
@@ -615,7 +621,9 @@ void TriggerLoad(HWND hwnd, const std::string& url, const std::string& postData 
     }
     SetWindowText(hwnd, L"Loading... - t2t");
     InvalidateRect(hwnd, NULL, FALSE);
-    LoadUrlAsync(hwnd, url, postData);
+
+    // ★ 変更: currentEpoch を渡す
+    LoadUrlAsync(hwnd, url, postData, currentEpoch);
 }
 
 // ★ 変更: postData 引数を追加
