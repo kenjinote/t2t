@@ -368,12 +368,12 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
         if (curl) {
             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
             curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-            // ★ 追加: postDataが空でない場合はPOSTリクエストとして送信
+            curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
             if (!postData.empty()) {
                 curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postData.c_str());
             }
-
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
             curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
