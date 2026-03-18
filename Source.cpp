@@ -112,12 +112,12 @@ std::string WideToNarrow(const std::wstring& wstr) {
     return narrowStr;
 }
 
-std::wstring NarrowToWide(const std::string& str) {
+std::wstring NarrowToWide(const std::string& str, UINT codePage = CP_UTF8) {
     if (str.empty()) return L"";
-    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, NULL, 0);
+    int size = MultiByteToWideChar(codePage, 0, str.c_str(), -1, NULL, 0);
     if (size <= 0) return L"";
     std::wstring wstr(size - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &wstr[0], size);
+    MultiByteToWideChar(codePage, 0, str.c_str(), -1, &wstr[0], size);
     return wstr;
 }
 
@@ -153,6 +153,12 @@ LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
     if (HandleGlobalShortcuts(hWnd, uMsg, wParam)) return 0;
     if (uMsg == WM_KEYDOWN) {
         if (wParam == VK_RETURN) {
+            bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (wParam == VK_PRIOR || wParam == VK_NEXT ||
+                (isCtrl && (wParam == VK_HOME || wParam == VK_END))) {
+                PostMessage(GetParent(hWnd), uMsg, wParam, lParam);
+                return 0;
+            }
             if (g_IsUrlMode) {
                 PostMessage(GetParent(hWnd), WM_EXECUTE_URL, 0, 0);
             }
@@ -177,6 +183,12 @@ LRESULT CALLBACK InputSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     WNDPROC oldProc = (WNDPROC)GetProp(hWnd, L"OldProc");
     if (HandleGlobalShortcuts(hWnd, uMsg, wParam)) return 0;
     if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
+        bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (wParam == VK_PRIOR || wParam == VK_NEXT ||
+            (isCtrl && (wParam == VK_HOME || wParam == VK_END))) {
+            PostMessage(GetParent(hWnd), uMsg, wParam, lParam);
+            return 0;
+        }
         if (wParam == VK_TAB) {
             PostMessage(GetParent(hWnd), WM_DO_TAB, (GetKeyState(VK_SHIFT) & 0x8000) ? 1 : 0, 0);
             return 0;
@@ -201,6 +213,11 @@ LRESULT CALLBACK InputSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     }
     if (uMsg == WM_SETFOCUS) {
         PostMessage(GetParent(hWnd), WM_SYNC_FOCUS, (WPARAM)hWnd, 0);
+        wchar_t className[256];
+        GetClassName(hWnd, className, 256);
+        if (lstrcmpi(className, L"EDIT") == 0) {
+            PostMessage(hWnd, EM_SETSEL, 0, -1);
+        }
     }
     if (oldProc) return CallWindowProc(oldProc, hWnd, uMsg, wParam, lParam);
     return DefWindowProc(hWnd, uMsg, wParam, lParam);
@@ -240,7 +257,20 @@ std::string ResolveUrl(const std::string& base, const std::string& rel) {
             return base + rel;
         }
     }
-    return base + "/" + rel;
+    std::string basePath = base;
+    size_t hashPos = basePath.find('#');
+    if (hashPos != std::string::npos) basePath = basePath.substr(0, hashPos);
+    size_t queryPos = basePath.find('?');
+    if (queryPos != std::string::npos) basePath = basePath.substr(0, queryPos);
+    size_t lastSlash = basePath.rfind('/');
+    size_t protoSlash = basePath.find("://");
+    if (lastSlash != std::string::npos && (protoSlash == std::string::npos || lastSlash > protoSlash + 2)) {
+        basePath = basePath.substr(0, lastSlash + 1);
+    }
+    else {
+        if (!basePath.empty() && basePath.back() != '/') basePath += '/';
+    }
+    return basePath + rel;
 }
 
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
@@ -261,6 +291,22 @@ struct ParsedPage {
     std::vector<Hyperlink> links; std::vector<FormInput> inputs;
     std::vector<HrElement> hrs;
 };
+
+UINT DetectCodePage(const std::string& html) {
+    std::string lowerHtml = html;
+    std::transform(lowerHtml.begin(), lowerHtml.end(), lowerHtml.begin(), ::tolower);
+    if (lowerHtml.find("charset=shift_jis") != std::string::npos ||
+        lowerHtml.find("charset=\"shift_jis\"") != std::string::npos ||
+        lowerHtml.find("charset='shift_jis'") != std::string::npos ||
+        lowerHtml.find("charset=sjis") != std::string::npos) {
+        return 932;
+    }
+    if (lowerHtml.find("charset=euc-jp") != std::string::npos ||
+        lowerHtml.find("charset=\"euc-jp\"") != std::string::npos) {
+        return 20932;
+    }
+    return CP_UTF8;
+}
 
 ParsedPage FetchAndStripHTML(const std::string& url) {
     std::wstring wstr;
@@ -307,7 +353,7 @@ ParsedPage FetchAndStripHTML(const std::string& url) {
             L"<b>Ctrl + C</b> : 選択中のテキストをクリップボードにコピー<br>"
             L"<b>q</b> : ブラウザを終了する<br><br>"
             L"<hr><br>"
-            L"t2t(v1.0.0)"
+            L"t2t(v1.0.1)"
             L"</body></html>";
     }
     else {
@@ -324,7 +370,8 @@ ParsedPage FetchAndStripHTML(const std::string& url) {
             curl_easy_perform(curl);
             curl_easy_cleanup(curl);
         }
-        wstr = NarrowToWide(readBuffer);
+        UINT cp = DetectCodePage(readBuffer);
+        wstr = NarrowToWide(readBuffer, cp);
     }
     std::wstring stripped; std::wstring pageTitle;
     std::vector<Hyperlink> links; std::vector<FormInput> inputs;
@@ -452,6 +499,22 @@ ParsedPage FetchAndStripHTML(const std::string& url) {
                 stripped += placeholder;
                 inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), currentBtnType, currentBtnName, currentBtnVal, NULL, currentBtnAction, false });
                 stripped += L" ";
+            }
+            else if (tagName == L"frame" || tagName == L"iframe") {
+                std::wstring wSrc = ExtractAttribute(currentTag, L"src");
+                std::wstring wName = ExtractAttribute(currentTag, L"name");
+                if (!wSrc.empty()) {
+                    std::string narrowSrc = WideToNarrow(wSrc);
+                    std::string resolvedSrc = ResolveUrl(url, narrowSrc);
+                    std::wstring frameLabel = (tagName == L"frame") ? L"[フレーム: " : L"[iframe: ";
+                    frameLabel += wName.empty() ? wSrc : wName;
+                    frameLabel += L"]";
+                    if (!stripped.empty() && stripped.back() != L'\n') stripped += L"\n";
+                    int start = (int)stripped.length();
+                    stripped += frameLabel;
+                    links.push_back({ (UINT32)start, (UINT32)frameLabel.length(), resolvedSrc });
+                    stripped += L"\n";
+                }
             }
             else if (tagName == L"hr" || tagName == L"hr/") {
                 if (!inScriptOrStyle && !inTitle && !inButton) {
@@ -601,7 +664,7 @@ void EnsureResources(HWND hwnd) {
         pRT->CreateSolidColorBrush(D2D1::ColorF(0.2f, 0.4f, 0.8f, 0.8f), &pSelectionBrush);
         pRT->CreateSolidColorBrush(D2D1::ColorF(0.4f, 0.6f, 1.0f), &pLinkBrush);
         pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.6f, 0.0f), &pFocusBrush);
-        pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &pHrBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.8f, 0.8f, 0.8f), &pHrBrush);
     }
 }
 
@@ -1277,19 +1340,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        if (!g_IsSearching) {
-            RECT rc; GetClientRect(hwnd, &rc); float pageHeight = max(40.0f, (float)rc.bottom - 40.0f);
+        {
+            RECT rc; GetClientRect(hwnd, &rc);
+            float pageHeight = max(40.0f, (float)rc.bottom - 40.0f);
             switch (wp) {
-            case VK_DOWN: case 'J': UpdateScrollPos(hwnd, g_ScrollY + 40.0f); break;
-            case VK_UP:   case 'K': UpdateScrollPos(hwnd, g_ScrollY - 40.0f); break;
-            case VK_NEXT: case VK_SPACE: UpdateScrollPos(hwnd, g_ScrollY + pageHeight); break;
-            case VK_PRIOR: case 'B':     UpdateScrollPos(hwnd, g_ScrollY - pageHeight); break;
-            case VK_HOME: UpdateScrollPos(hwnd, 0.0f); break;
-            case VK_END:  UpdateScrollPos(hwnd, g_MaxScrollY); break;
-            case 'Q': PostQuitMessage(0); break;
+            case VK_NEXT:  UpdateScrollPos(hwnd, g_ScrollY + pageHeight); return 0;
+            case VK_PRIOR: UpdateScrollPos(hwnd, g_ScrollY - pageHeight); return 0;
+            case VK_HOME:  UpdateScrollPos(hwnd, 0.0f); return 0;
+            case VK_END:   UpdateScrollPos(hwnd, g_MaxScrollY); return 0;
+            }
+            if (!g_IsSearching) {
+                switch (wp) {
+                case VK_DOWN: case 'J': UpdateScrollPos(hwnd, g_ScrollY + 40.0f); break;
+                case VK_UP:   case 'K': UpdateScrollPos(hwnd, g_ScrollY - 40.0f); break;
+                case VK_SPACE:          UpdateScrollPos(hwnd, g_ScrollY + pageHeight); break;
+                case 'B':               UpdateScrollPos(hwnd, g_ScrollY - pageHeight); break;
+                case 'Q':               PostQuitMessage(0); break;
+                }
             }
         }
-        return 0;
+    return 0;
     case WM_VSCROLL:
     {
         SCROLLINFO si = { sizeof(si), SIF_ALL }; GetScrollInfo(hwnd, SB_VERT, &si);
@@ -1358,6 +1428,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR pCmdLine, int n) {
     WNDCLASS wc = { 0 };
     wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = WndProc; wc.hInstance = hi; wc.lpszClassName = L"t2t";
+	wc.hIcon = LoadIcon(hi, MAKEINTRESOURCE(IDI_ICON1));
     wc.hCursor = LoadCursor(NULL, IDC_IBEAM);
     RegisterClass(&wc);
     HWND hwnd = CreateWindow(L"t2t", L"t2t", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN, 100, 100, 800, 600, 0, 0, hi, 0);
