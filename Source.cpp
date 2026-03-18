@@ -572,11 +572,18 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 else if (ent == L"&apos;") decoded = L'\'';
                 else if (ent == L"&copy;") decoded = 0x00A9;
                 else if (ent.length() > 3 && ent[1] == L'#') {
-                    try {
-                        if (ent[2] == L'x' || ent[2] == L'X') decoded = (wchar_t)std::stoi(ent.substr(3, ent.length() - 4), nullptr, 16);
-                        else decoded = (wchar_t)std::stoi(ent.substr(2, ent.length() - 3));
+                    bool isHex = (ent[2] == L'x' || ent[2] == L'X');
+                    size_t startIdx = isHex ? 3 : 2;
+                    std::wstring numStr = ent.substr(startIdx, ent.length() - startIdx - 1);
+
+                    // 例外を投げない wcstoul を使用して安全に数値化
+                    wchar_t* endPtr = nullptr;
+                    unsigned long val = wcstoul(numStr.c_str(), &endPtr, isHex ? 16 : 10);
+
+                    // ポインタが進んでいれば変換成功。かつWindowsのwchar_t(16bit)の範囲内かチェック
+                    if (endPtr != numStr.c_str() && val > 0 && val <= 0xFFFF) {
+                        decoded = (wchar_t)val;
                     }
-                    catch (...) {}
                 }
                 if (decoded != 0) { AppendTextChar(decoded); i = semi; continue; }
             }
