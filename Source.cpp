@@ -25,7 +25,6 @@
 #pragma comment(lib, "zlib.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
-
 #define WM_CONTENT_LOADED (WM_APP + 1)
 #define WM_SUBMIT_FORM    (WM_APP + 2) 
 #define WM_DO_TAB         (WM_APP + 3) 
@@ -34,10 +33,8 @@
 #define WM_CANCEL_SEARCH  (WM_APP + 6) 
 #define WM_EXECUTE_URL    (WM_APP + 7) 
 #define TIMER_AUTOSCROLL  1001
-
 const wchar_t* CUSTOM_FONT_FAMILY = L"ノスタルドット（M+）";
 const int CUSTOM_FONT_SIZE = 24;
-
 ID2D1Factory* pD2DFactory = nullptr;
 ID2D1HwndRenderTarget* pRT = nullptr;
 ID2D1SolidColorBrush* pTextBrush = nullptr;
@@ -52,7 +49,6 @@ IDWriteTextFormat* pTextFormat = nullptr;
 IDWriteTextLayout* pTextLayout = nullptr;
 HFONT g_hCustomFont = nullptr;
 HANDLE g_hGdiFont = nullptr;
-
 struct Hyperlink { UINT32 start; UINT32 length; std::string url; };
 struct HrElement { UINT32 textPosition; };
 struct FormInput {
@@ -63,7 +59,7 @@ struct FormInput {
     std::wstring value;
     HWND hwnd;
     std::string action;
-    std::string method; // ★ 追加: フォームのGET/POSTメソッドを保持
+    std::string method;
     bool checked;
 };
 enum class FocusType { LINK, INPUT };
@@ -72,7 +68,6 @@ struct FocusItem {
     size_t index;
     UINT32 start;
 };
-
 std::wstring g_WebPageContent = L"Loading...";
 std::wstring g_PageTitle = L"t2t";
 std::vector<Hyperlink> g_Links;
@@ -98,14 +93,11 @@ bool g_IsSearching = false;
 bool g_IsUrlMode = false;
 std::wstring g_LastSearchQuery = L"";
 WNDPROC g_OldSearchEditProc = nullptr;
-
-// ★ 変更: postData 引数を追加
 void NavigateTo(HWND hwnd, const std::string& url, const std::string& postData = "");
 void GoBack(HWND hwnd);
 void GoForward(HWND hwnd);
 void ReloadCurrentPage(HWND hwnd);
 void OpenAddressBar(HWND hwnd);
-
 std::string WideToNarrow(const std::wstring& wstr) {
     if (wstr.empty()) return "";
     int size = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, NULL, 0, NULL, NULL);
@@ -114,7 +106,6 @@ std::string WideToNarrow(const std::wstring& wstr) {
     WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &narrowStr[0], size, NULL, NULL);
     return narrowStr;
 }
-
 std::wstring NarrowToWide(const std::string& str, UINT codePage = CP_UTF8) {
     if (str.empty()) return L"";
     int size = MultiByteToWideChar(codePage, 0, str.c_str(), -1, NULL, 0);
@@ -123,7 +114,6 @@ std::wstring NarrowToWide(const std::string& str, UINT codePage = CP_UTF8) {
     MultiByteToWideChar(codePage, 0, str.c_str(), -1, &wstr[0], size);
     return wstr;
 }
-
 bool HandleGlobalShortcuts(HWND hWnd, UINT uMsg, WPARAM wParam) {
     HWND hMain = GetParent(hWnd);
     if (hMain == NULL) {
@@ -151,7 +141,6 @@ bool HandleGlobalShortcuts(HWND hWnd, UINT uMsg, WPARAM wParam) {
     }
     return false;
 }
-
 LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (HandleGlobalShortcuts(hWnd, uMsg, wParam)) return 0;
     if (uMsg == WM_KEYDOWN) {
@@ -184,7 +173,6 @@ LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
     }
     return CallWindowProc(g_OldSearchEditProc, hWnd, uMsg, wParam, lParam);
 }
-
 LRESULT CALLBACK InputSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     WNDPROC oldProc = (WNDPROC)GetProp(hWnd, L"OldProc");
     if (HandleGlobalShortcuts(hWnd, uMsg, wParam)) return 0;
@@ -228,7 +216,6 @@ LRESULT CALLBACK InputSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     if (oldProc) return CallWindowProc(oldProc, hWnd, uMsg, wParam, lParam);
     return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
-
 std::wstring ExtractAttribute(const std::wstring& tag, const std::wstring& attr) {
     std::wstring search = attr + L"=";
     size_t pos = 0;
@@ -252,7 +239,6 @@ std::wstring ExtractAttribute(const std::wstring& tag, const std::wstring& attr)
     }
     return L"";
 }
-
 std::string ResolveUrl(const std::string& base, const std::string& rel) {
     if (rel.empty() || rel.find("http://") == 0 || rel.find("https://") == 0 || rel.find("about:") == 0) return rel;
     if (rel[0] == '/') {
@@ -278,11 +264,9 @@ std::string ResolveUrl(const std::string& base, const std::string& rel) {
     }
     return basePath + rel;
 }
-
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
     userp->append((char*)contents, size * nmemb); return size * nmemb;
 }
-
 std::wstring GetTagName(const std::wstring& tag) {
     std::wstring name = L"";
     for (wchar_t c : tag) {
@@ -291,13 +275,11 @@ std::wstring GetTagName(const std::wstring& tag) {
     }
     return name;
 }
-
 struct ParsedPage {
     std::wstring text; std::wstring title;
     std::vector<Hyperlink> links; std::vector<FormInput> inputs;
     std::vector<HrElement> hrs;
 };
-
 UINT DetectCodePage(const std::string& html) {
     std::string lowerHtml = html;
     std::transform(lowerHtml.begin(), lowerHtml.end(), lowerHtml.begin(), ::tolower);
@@ -313,8 +295,6 @@ UINT DetectCodePage(const std::string& html) {
     }
     return CP_UTF8;
 }
-
-// ★ 変更: postData 引数を追加し、curl に設定
 ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData = "") {
     std::wstring wstr;
     if (url == "about:home") {
@@ -392,16 +372,13 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
     bool inTag = false, inScriptOrStyle = false, inTitle = false, inPreTag = false;
     std::wstring currentTag = L"";
     int currentLinkStart = -1; std::string currentLinkUrl = "";
-
     std::wstring currentFormAction = L"";
-    std::string currentFormMethod = "GET"; // ★ 追加: フォームのメソッドをトラッキング
-
+    std::string currentFormMethod = "GET";
     bool inButton = false;
     std::wstring currentBtnType = L"";
     std::wstring currentBtnName = L"";
     std::wstring currentBtnVal = L"";
     std::string currentBtnAction = "";
-
     auto AppendTextChar = [&](wchar_t c) {
         if (inTitle) {
             pageTitle += c;
@@ -422,7 +399,6 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             }
         }
         };
-
     for (size_t i = 0; i < wstr.length(); ++i) {
         wchar_t c = wstr[i];
         if (c == L'<') { inTag = true; currentTag = L""; }
@@ -434,8 +410,6 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             else if (tagName == L"/title") inTitle = false;
             else if (tagName == L"form") {
                 currentFormAction = ExtractAttribute(currentTag, L"action");
-
-                // ★ 追加: method属性をパースして取得（大文字化して比較）
                 std::wstring wMethod = ExtractAttribute(currentTag, L"method");
                 std::transform(wMethod.begin(), wMethod.end(), wMethod.begin(), ::toupper);
                 if (wMethod == L"POST") currentFormMethod = "POST";
@@ -443,7 +417,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             }
             else if (tagName == L"/form") {
                 currentFormAction = L"";
-                currentFormMethod = "GET"; // ★ 追加: フォームを抜けたらデフォルトに戻す
+                currentFormMethod = "GET";
             }
             else if (tagName == L"pre") {
                 inPreTag = true;
@@ -478,9 +452,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                     lowerTag.find(L"checked>") != std::wstring::npos);
                 std::string narrowAction = WideToNarrow(currentFormAction);
                 std::string resolvedAction = ResolveUrl(url, narrowAction);
-
                 if (type == L"hidden") {
-                    // ★ 変更: currentFormMethod を追加
                     inputs.push_back({ (UINT32)stripped.length(), 0, type, name, val, NULL, resolvedAction, currentFormMethod, isChecked });
                 }
                 else {
@@ -499,7 +471,6 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                     }
                     int start = (int)stripped.length();
                     stripped += placeholder;
-                    // ★ 変更: currentFormMethod を追加
                     inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), type, name, val, NULL, resolvedAction, currentFormMethod, isChecked });
                     stripped += L" ";
                 }
@@ -511,7 +482,6 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 if (currentBtnType.empty()) currentBtnType = L"submit";
                 currentBtnName = ExtractAttribute(currentTag, L"name");
                 currentBtnVal = ExtractAttribute(currentTag, L"value");
-
                 std::string narrowAction = WideToNarrow(currentFormAction);
                 currentBtnAction = ResolveUrl(url, narrowAction);
             }
@@ -525,7 +495,6 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 std::wstring placeholder = std::wstring(3, L'\x00A0') + safeVal + std::wstring(3, L'\x00A0');
                 int start = (int)stripped.length();
                 stripped += placeholder;
-                // ★ 変更: currentFormMethod を追加
                 inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), currentBtnType, currentBtnName, currentBtnVal, NULL, currentBtnAction, currentFormMethod, false });
                 stripped += L" ";
             }
@@ -575,12 +544,8 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                     bool isHex = (ent[2] == L'x' || ent[2] == L'X');
                     size_t startIdx = isHex ? 3 : 2;
                     std::wstring numStr = ent.substr(startIdx, ent.length() - startIdx - 1);
-
-                    // 例外を投げない wcstoul を使用して安全に数値化
                     wchar_t* endPtr = nullptr;
                     unsigned long val = wcstoul(numStr.c_str(), &endPtr, isHex ? 16 : 10);
-
-                    // ポインタが進んでいれば変換成功。かつWindowsのwchar_t(16bit)の範囲内かチェック
                     if (endPtr != numStr.c_str() && val > 0 && val <= 0xFFFF) {
                         decoded = (wchar_t)val;
                     }
@@ -595,26 +560,18 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
     pageTitle.erase(pageTitle.find_last_not_of(L" \t\r\n") + 1);
     return { stripped, pageTitle, links, inputs, hrs };
 }
-
-// ★ 変更: postData 引数を追加
 void LoadUrlAsync(HWND hwnd, const std::string& url, const std::string& postData, int epoch) {
     std::thread([hwnd, url, postData, epoch]() {
         ParsedPage* page = new ParsedPage(FetchAndStripHTML(url, postData));
-
-        // ★ 変更: アプリ終了時、または新しいロードが既に始まっている場合は破棄
         if (!g_AppRunning || epoch != g_LoadEpoch.load()) {
             delete page;
             return;
         }
-
         PostMessage(hwnd, WM_CONTENT_LOADED, (WPARAM)page, 0);
         }).detach();
 }
-
-// ★ 変更: postData 引数を追加
 void TriggerLoad(HWND hwnd, const std::string& url, const std::string& postData = "") {
-    int currentEpoch = ++g_LoadEpoch; // ★ 追加: 新しいロード処理の世代を発行
-
+    int currentEpoch = ++g_LoadEpoch;
     {
         std::lock_guard<std::mutex> lock(g_ContentMutex);
         for (auto& input : g_Inputs) {
@@ -628,12 +585,8 @@ void TriggerLoad(HWND hwnd, const std::string& url, const std::string& postData 
     }
     SetWindowText(hwnd, L"Loading... - t2t");
     InvalidateRect(hwnd, NULL, FALSE);
-
-    // ★ 変更: currentEpoch を渡す
     LoadUrlAsync(hwnd, url, postData, currentEpoch);
 }
-
-// ★ 変更: postData 引数を追加
 void NavigateTo(HWND hwnd, const std::string& url, const std::string& postData) {
     if (g_HistoryIndex >= 0 && g_HistoryIndex < (int)g_History.size() - 1) g_History.resize(g_HistoryIndex + 1);
     if (g_History.empty() || g_History.back() != url) {
@@ -641,16 +594,13 @@ void NavigateTo(HWND hwnd, const std::string& url, const std::string& postData) 
     }
     TriggerLoad(hwnd, url, postData);
 }
-
 void GoBack(HWND hwnd) { if (g_HistoryIndex > 0) TriggerLoad(hwnd, g_History[--g_HistoryIndex]); }
 void GoForward(HWND hwnd) { if (g_HistoryIndex < (int)g_History.size() - 1) TriggerLoad(hwnd, g_History[++g_HistoryIndex]); }
-
 void ReloadCurrentPage(HWND hwnd) {
     if (g_HistoryIndex >= 0 && g_HistoryIndex < (int)g_History.size()) {
         TriggerLoad(hwnd, g_History[g_HistoryIndex]);
     }
 }
-
 void OpenAddressBar(HWND hwnd) {
     if (!g_hSearchEdit) {
         g_hSearchEdit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
@@ -678,7 +628,6 @@ void OpenAddressBar(HWND hwnd) {
     ShowWindow(g_hSearchEdit, SW_SHOW);
     SetFocus(g_hSearchEdit);
 }
-
 void CopyToClipboard(HWND hwnd) {
     if (g_SelectionLength == 0) return;
     std::wstring textToCopy;
@@ -699,7 +648,6 @@ void CopyToClipboard(HWND hwnd) {
         CloseClipboard();
     }
 }
-
 void EnsureResources(HWND hwnd) {
     if (!pRT) {
         RECT rc; GetClientRect(hwnd, &rc);
@@ -715,7 +663,6 @@ void EnsureResources(HWND hwnd) {
         pRT->CreateSolidColorBrush(D2D1::ColorF(0.9f, 0.9f, 0.9f), &pStatusTextBrush);
     }
 }
-
 void PositionInputControls(HWND hwnd) {
     if (!pTextLayout) return;
     std::lock_guard<std::mutex> lock(g_ContentMutex);
@@ -742,7 +689,6 @@ void PositionInputControls(HWND hwnd) {
         MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
     }
 }
-
 void ApplyFocus(HWND hwnd) {
     if (g_FocusItems.empty()) return;
     if (g_FocusIndex < 0) g_FocusIndex = 0;
@@ -775,7 +721,6 @@ void ApplyFocus(HWND hwnd) {
     }
     InvalidateRect(hwnd, NULL, FALSE);
 }
-
 void UpdateLayoutAndScrollbar(HWND hwnd) {
     if (!pDWriteFactory) return;
     EnsureResources(hwnd);
@@ -855,7 +800,6 @@ void UpdateLayoutAndScrollbar(HWND hwnd) {
     }
     PositionInputControls(hwnd);
 }
-
 void Render(HWND hwnd) {
     EnsureResources(hwnd);
     pRT->BeginDraw();
@@ -910,43 +854,31 @@ void Render(HWND hwnd) {
         }
     }
     std::string displayUrl = "";
-    // マウスホバーしている場合
     if (g_IsHoveringLink && !g_HoveredUrl.empty()) {
         displayUrl = g_HoveredUrl;
     }
-    // キーボードフォーカスが当たっている場合
     else if (g_FocusIndex >= 0 && g_FocusIndex < (int)g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::LINK) {
         displayUrl = g_Links[g_FocusItems[g_FocusIndex].index].url;
     }
-
     if (!displayUrl.empty()) {
         std::wstring wUrl = NarrowToWide(displayUrl);
         IDWriteTextLayout* pStatusLayout = nullptr;
-        // 既存のフォント設定を流用してURL用のレイアウトを作成
         pDWriteFactory->CreateTextLayout(wUrl.c_str(), (UINT32)wUrl.length(),
             pTextFormat, pRT->GetSize().width - 10.0f, 100.0f, &pStatusLayout);
-
         if (pStatusLayout) {
-            // 1行に収めて途中で見切れるように折り返しを無効化
             pStatusLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             DWRITE_TEXT_METRICS sm;
             pStatusLayout->GetMetrics(&sm);
-
             float barHeight = sm.height + 4.0f;
             float yPos = pRT->GetSize().height - barHeight;
-
-            // 背景矩形の描画
             D2D1_RECT_F bgRect = D2D1::RectF(0.0f, yPos, pRT->GetSize().width, pRT->GetSize().height);
             if (pStatusBarBrush) pRT->FillRectangle(bgRect, pStatusBarBrush);
-            // URLテキストの描画
             if (pStatusTextBrush) pRT->DrawTextLayout(D2D1::Point2F(5.0f, yPos + 2.0f), pStatusLayout, pStatusTextBrush);
-
             pStatusLayout->Release();
         }
     }
     pRT->EndDraw();
 }
-
 UINT32 GetTextPositionFromMouse(int mouseX, int mouseY, BOOL* outIsInside = nullptr) {
     if (!pTextLayout) {
         if (outIsInside) *outIsInside = FALSE;
@@ -960,14 +892,12 @@ UINT32 GetTextPositionFromMouse(int mouseX, int mouseY, BOOL* outIsInside = null
     if (outIsInside) *outIsInside = isInside;
     return metrics.textPosition + (isTrailingHit ? 1 : 0);
 }
-
 void UpdateScrollPos(HWND hwnd, float newY) {
     g_ScrollY = max(0.0f, min(newY, g_MaxScrollY));
     SetScrollPos(hwnd, SB_VERT, (int)g_ScrollY, TRUE);
     PositionInputControls(hwnd);
     InvalidateRect(hwnd, NULL, FALSE);
 }
-
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CONTENT_LOADED:
@@ -1102,7 +1032,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else {
             MessageBeep(MB_OK);
         }
-
         PostMessage(hwnd, WM_CANCEL_SEARCH, 0, 0);
         InvalidateRect(hwnd, NULL, FALSE);
     }
@@ -1186,11 +1115,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     {
         if (g_Inputs.empty()) return 0;
         std::string targetAction = "";
-        std::string targetMethod = "GET"; // ★ 追加
+        std::string targetMethod = "GET";
         std::string queryString = "";
         CURL* curl = curl_easy_init();
-
-        // ★ 変更: フォーカスがある入力要素を基準に、対象のフォームのアクションとメソッドを特定
         int submitFormIndex = -1;
         if (g_FocusIndex >= 0 && g_FocusIndex < (int)g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
             submitFormIndex = (int)g_FocusItems[g_FocusIndex].index;
@@ -1199,19 +1126,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             targetAction = g_Inputs[submitFormIndex].action;
             targetMethod = g_Inputs[submitFormIndex].method;
         }
-
         for (const auto& input : g_Inputs) {
             if (targetAction.empty() && !input.action.empty()) {
                 targetAction = input.action;
                 targetMethod = input.method;
             }
-
-            // ★ 変更: 対象フォーム（action）が異なる input はスキップ（複数フォーム対応）
             if (!input.action.empty() && input.action != targetAction && targetAction != "") continue;
-
             if (input.name.empty()) continue;
             if (input.type == L"button" || input.type == L"submit" || input.type == L"reset") continue;
-
             std::wstring val = input.value;
             if (input.hwnd && input.type != L"hidden") {
                 if (input.type == L"radio" || input.type == L"checkbox") {
@@ -1240,8 +1162,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (curl) curl_easy_cleanup(curl);
         if (targetAction.empty() && !g_History.empty()) targetAction = g_History.back();
         std::string finalUrl = targetAction;
-
-        // ★ 変更: GETかPOSTかで処理を分岐
         if (targetMethod == "POST") {
             NavigateTo(hwnd, finalUrl, queryString);
         }
@@ -1337,7 +1257,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
-
     case WM_MOUSEMOVE:
     {
         BOOL isInside = FALSE;
@@ -1356,7 +1275,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_IsHoveringLink = foundLink;
             g_HoveredUrl = targetUrl;
             SetCursor(LoadCursor(NULL, g_IsHoveringLink ? IDC_HAND : IDC_IBEAM));
-            InvalidateRect(hwnd, NULL, FALSE); // ← これがステータスバー表示のトリガーになる
+            InvalidateRect(hwnd, NULL, FALSE);
         }
         if (g_IsSelecting && currentPos != UINT32_MAX && g_SelectionAnchor != UINT32_MAX) {
             if (currentPos < g_SelectionAnchor) {
@@ -1493,7 +1412,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProc(hwnd, msg, wp, lp);
 }
-
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR pCmdLine, int n) {
     curl_global_init(CURL_GLOBAL_ALL);
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &pD2DFactory);
