@@ -428,9 +428,18 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 if (!stripped.empty() && stripped.back() != L'\n') stripped += L"\n";
             }
             else if (tagName == L"a") {
-                currentLinkStart = (int)stripped.length();
                 std::wstring wHref = ExtractAttribute(currentTag, L"href");
-                currentLinkUrl = ResolveUrl(url, WideToNarrow(wHref));
+                std::string narrowHref = WideToNarrow(wHref);
+                std::string lowerHref = narrowHref;
+                std::transform(lowerHref.begin(), lowerHref.end(), lowerHref.begin(), ::tolower);
+                if (lowerHref.find("tel:") == 0 || lowerHref.find("mailto:") == 0 || lowerHref.find("javascript:") == 0) {
+                    currentLinkStart = -1;
+                    currentLinkUrl = "";
+                }
+                else {
+                    currentLinkStart = (int)stripped.length();
+                    currentLinkUrl = ResolveUrl(url, narrowHref);
+                }
             }
             else if (tagName == L"/a") {
                 if (currentLinkStart != -1 && !currentLinkUrl.empty()) {
