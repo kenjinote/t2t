@@ -4,6 +4,7 @@
 #define CURL_STATICLIB
 #include <windows.h>
 #include <windowsx.h>
+#include <imm.h>
 #include <d2d1.h>
 #include <dwrite_3.h> 
 #include <curl/curl.h>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include "resource.h"
+#pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "libcurl.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Wldap32.lib")
@@ -33,6 +35,7 @@
 #define WM_CANCEL_SEARCH  (WM_APP + 6) 
 #define WM_EXECUTE_URL    (WM_APP + 7) 
 #define TIMER_AUTOSCROLL  1001
+#define TIMER_CARET       1002
 const wchar_t* CUSTOM_FONT_FAMILY = L"ノスタルドット（M+）";
 const int CUSTOM_FONT_SIZE = 24;
 ID2D1Factory* pD2DFactory = nullptr;
@@ -44,6 +47,10 @@ ID2D1SolidColorBrush* pFocusBrush = nullptr;
 ID2D1SolidColorBrush* pHrBrush = nullptr;
 ID2D1SolidColorBrush* pStatusBarBrush = nullptr;
 ID2D1SolidColorBrush* pStatusTextBrush = nullptr;
+ID2D1SolidColorBrush* pControlBgBrush = nullptr;
+ID2D1SolidColorBrush* pControlBorderBrush = nullptr;
+ID2D1SolidColorBrush* pControlFillBrush = nullptr;
+ID2D1SolidColorBrush* pControlTextBrush = nullptr;
 IDWriteFactory* pDWriteFactory = nullptr;
 IDWriteTextFormat* pTextFormat = nullptr;
 IDWriteTextLayout* pTextLayout = nullptr;
@@ -57,10 +64,10 @@ struct FormInput {
     std::wstring type;
     std::wstring name;
     std::wstring value;
-    HWND hwnd;
     std::string action;
     std::string method;
     bool checked;
+    D2D1_RECT_F rect;
 };
 enum class FocusType { LINK, INPUT };
 struct FocusItem {
@@ -172,49 +179,6 @@ LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         PostMessage(hWnd, EM_SETSEL, 0, -1);
     }
     return CallWindowProc(g_OldSearchEditProc, hWnd, uMsg, wParam, lParam);
-}
-LRESULT CALLBACK InputSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    WNDPROC oldProc = (WNDPROC)GetProp(hWnd, L"OldProc");
-    if (HandleGlobalShortcuts(hWnd, uMsg, wParam)) return 0;
-    if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
-        bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        if (wParam == VK_PRIOR || wParam == VK_NEXT ||
-            (isCtrl && (wParam == VK_HOME || wParam == VK_END))) {
-            PostMessage(GetParent(hWnd), uMsg, wParam, lParam);
-            return 0;
-        }
-        if (wParam == VK_TAB) {
-            PostMessage(GetParent(hWnd), WM_DO_TAB, (GetKeyState(VK_SHIFT) & 0x8000) ? 1 : 0, 0);
-            return 0;
-        }
-        if (wParam == VK_RETURN) {
-            wchar_t className[256];
-            GetClassName(hWnd, className, 256);
-            if (lstrcmpi(className, L"EDIT") == 0) {
-                PostMessage(GetParent(hWnd), WM_SUBMIT_FORM, 0, 0);
-                return 0;
-            }
-            else if (lstrcmpi(className, L"BUTTON") == 0) {
-                PostMessage(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
-                return 0;
-            }
-        }
-    }
-    if (uMsg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_TAB)) {
-        wchar_t className[256];
-        GetClassName(hWnd, className, 256);
-        if (lstrcmpi(className, L"EDIT") == 0 || lstrcmpi(className, L"BUTTON") == 0) return 0;
-    }
-    if (uMsg == WM_SETFOCUS) {
-        PostMessage(GetParent(hWnd), WM_SYNC_FOCUS, (WPARAM)hWnd, 0);
-        wchar_t className[256];
-        GetClassName(hWnd, className, 256);
-        if (lstrcmpi(className, L"EDIT") == 0) {
-            PostMessage(hWnd, EM_SETSEL, 0, -1);
-        }
-    }
-    if (oldProc) return CallWindowProc(oldProc, hWnd, uMsg, wParam, lParam);
-    return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 std::wstring ExtractAttribute(const std::wstring& tag, const std::wstring& attr) {
     std::wstring search = attr + L"=";
@@ -462,7 +426,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 std::string narrowAction = WideToNarrow(currentFormAction);
                 std::string resolvedAction = ResolveUrl(url, narrowAction);
                 if (type == L"hidden") {
-                    inputs.push_back({ (UINT32)stripped.length(), 0, type, name, val, NULL, resolvedAction, currentFormMethod, isChecked });
+                    inputs.push_back({ (UINT32)stripped.length(), 0, type, name, val, resolvedAction, currentFormMethod, isChecked, D2D1::RectF() });
                 }
                 else {
                     std::wstring placeholder;
@@ -480,7 +444,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                     }
                     int start = (int)stripped.length();
                     stripped += placeholder;
-                    inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), type, name, val, NULL, resolvedAction, currentFormMethod, isChecked });
+                    inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), type, name, val, resolvedAction, currentFormMethod, isChecked, D2D1::RectF() });
                     stripped += L" ";
                 }
             }
@@ -504,7 +468,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 std::wstring placeholder = std::wstring(3, L'\x00A0') + safeVal + std::wstring(3, L'\x00A0');
                 int start = (int)stripped.length();
                 stripped += placeholder;
-                inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), currentBtnType, currentBtnName, currentBtnVal, NULL, currentBtnAction, currentFormMethod, false });
+                inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), currentBtnType, currentBtnName, currentBtnVal, currentBtnAction, currentFormMethod, false, D2D1::RectF() });
                 stripped += L" ";
             }
             else if (tagName == L"frame" || tagName == L"iframe") {
@@ -581,19 +545,7 @@ void LoadUrlAsync(HWND hwnd, const std::string& url, const std::string& postData
 }
 void TriggerLoad(HWND hwnd, const std::string& url, const std::string& postData = "") {
     int currentEpoch = ++g_LoadEpoch;
-    {
-        std::lock_guard<std::mutex> lock(g_ContentMutex);
-        for (auto& input : g_Inputs) {
-            if (input.hwnd) DestroyWindow(input.hwnd);
-        }
-        g_Inputs.clear();
-        g_FocusItems.clear();
-        g_Hrs.clear();
-        g_WebPageContent = L"Loading...\n" + NarrowToWide(url);
-        g_PageTitle = L"Loading...";
-    }
     SetWindowText(hwnd, L"Loading... - t2t");
-    InvalidateRect(hwnd, NULL, FALSE);
     LoadUrlAsync(hwnd, url, postData, currentEpoch);
 }
 void NavigateTo(HWND hwnd, const std::string& url, const std::string& postData) {
@@ -614,12 +566,8 @@ void OpenAddressBar(HWND hwnd) {
     if (!g_hSearchEdit) {
         g_hSearchEdit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
             0, 0, 0, 0, hwnd, (HMENU)999, GetModuleHandle(NULL), NULL);
-        if (g_hCustomFont) {
-            SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)g_hCustomFont, TRUE);
-        }
-        else {
-            SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-        }
+        if (g_hCustomFont) SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)g_hCustomFont, TRUE);
+        else SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
         g_OldSearchEditProc = (WNDPROC)SetWindowLongPtr(g_hSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditSubclassProc);
     }
     g_IsUrlMode = true;
@@ -628,9 +576,7 @@ void OpenAddressBar(HWND hwnd) {
     int editHeight = CUSTOM_FONT_SIZE + 6;
     MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
     std::string currentUrl = "about:home";
-    if (g_HistoryIndex >= 0 && g_HistoryIndex < (int)g_History.size()) {
-        currentUrl = g_History[g_HistoryIndex];
-    }
+    if (g_HistoryIndex >= 0 && g_HistoryIndex < (int)g_History.size()) currentUrl = g_History[g_HistoryIndex];
     std::wstring wCurrentUrl = NarrowToWide(currentUrl);
     SetWindowText(g_hSearchEdit, wCurrentUrl.c_str());
     SendMessage(g_hSearchEdit, EM_SETSEL, 0, -1);
@@ -670,32 +616,10 @@ void EnsureResources(HWND hwnd) {
         pRT->CreateSolidColorBrush(D2D1::ColorF(0.8f, 0.8f, 0.8f), &pHrBrush);
         pRT->CreateSolidColorBrush(D2D1::ColorF(0.1f, 0.1f, 0.1f, 0.9f), &pStatusBarBrush);
         pRT->CreateSolidColorBrush(D2D1::ColorF(0.9f, 0.9f, 0.9f), &pStatusTextBrush);
-    }
-}
-void PositionInputControls(HWND hwnd) {
-    if (!pTextLayout) return;
-    std::lock_guard<std::mutex> lock(g_ContentMutex);
-    for (auto& input : g_Inputs) {
-        if (input.hwnd) {
-            UINT32 actualCount = 0;
-            DWRITE_HIT_TEST_METRICS hitMetrics;
-            pTextLayout->HitTestTextRange(input.start, input.length, 0, 0, &hitMetrics, 1, &actualCount);
-            if (actualCount > 0) {
-                float x = 10.0f + hitMetrics.left;
-                float y = 13.0f + hitMetrics.top;
-                int cx = (int)hitMetrics.width;
-                int cy = (int)hitMetrics.height;
-                if (input.type == L"radio" || input.type == L"checkbox") {
-                    cx = cy;
-                }
-                MoveWindow(input.hwnd, (int)x, (int)(y - g_ScrollY), cx, cy, TRUE);
-            }
-        }
-    }
-    if (g_hSearchEdit && g_IsSearching) {
-        RECT rc; GetClientRect(hwnd, &rc);
-        int editHeight = CUSTOM_FONT_SIZE + 6;
-        MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.15f, 0.15f, 0.15f), &pControlBgBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.5f, 0.5f, 0.5f), &pControlBorderBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.9f, 0.9f, 0.9f), &pControlFillBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f), &pControlTextBrush);
     }
 }
 void ApplyFocus(HWND hwnd) {
@@ -718,16 +642,9 @@ void ApplyFocus(HWND hwnd) {
             }
             g_ScrollY = max(0.0f, min(g_ScrollY, g_MaxScrollY));
             SetScrollPos(hwnd, SB_VERT, (int)g_ScrollY, TRUE);
-            PositionInputControls(hwnd);
         }
     }
-    if (item.type == FocusType::INPUT) {
-        HWND hInput = g_Inputs[item.index].hwnd;
-        if (hInput) SetFocus(hInput);
-    }
-    else {
-        SetFocus(hwnd);
-    }
+    SetFocus(hwnd); // 常にメインウィンドウがフォーカスを受け取る
     InvalidateRect(hwnd, NULL, FALSE);
 }
 void UpdateLayoutAndScrollbar(HWND hwnd) {
@@ -758,56 +675,40 @@ void UpdateLayoutAndScrollbar(HWND hwnd) {
         si.nPos = (int)g_ScrollY; SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
         {
             std::lock_guard<std::mutex> lock(g_ContentMutex);
-            for (size_t i = 0; i < g_Inputs.size(); ++i) {
-                auto& input = g_Inputs[i];
-                if (input.type == L"hidden" || input.hwnd) continue;
-                DWORD style = WS_CHILD | WS_VISIBLE;
-                LPCWSTR className = L"EDIT";
-                if (input.type == L"button" || input.type == L"submit" || input.type == L"reset") {
-                    className = L"BUTTON"; style |= BS_PUSHBUTTON | BS_FLAT;
-                }
-                else if (input.type == L"radio") {
-                    className = L"BUTTON"; style |= BS_AUTORADIOBUTTON | BS_FLAT;
-                }
-                else if (input.type == L"checkbox") {
-                    className = L"BUTTON"; style |= BS_AUTOCHECKBOX | BS_FLAT;
-                }
-                else {
-                    style |= WS_BORDER | ES_AUTOHSCROLL;
-                }
-                std::wstring windowText = input.value;
-                if (input.type == L"radio" || input.type == L"checkbox") {
-                    windowText = L"";
-                }
-                input.hwnd = CreateWindowEx(0, className, windowText.c_str(), style,
-                    0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)(1000 + i), GetModuleHandle(NULL), NULL);
-                if (input.checked && (input.type == L"radio" || input.type == L"checkbox")) {
-                    SendMessage(input.hwnd, BM_SETCHECK, BST_CHECKED, 0);
-                }
-                if (g_hCustomFont) {
-                    SendMessage(input.hwnd, WM_SETFONT, (WPARAM)g_hCustomFont, TRUE);
-                }
-                else {
-                    SendMessage(input.hwnd, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-                }
-                WNDPROC oldProc = (WNDPROC)SetWindowLongPtr(input.hwnd, GWLP_WNDPROC, (LONG_PTR)InputSubclassProc);
-                SetProp(input.hwnd, L"OldProc", (HANDLE)oldProc);
-            }
             g_FocusItems.clear();
             for (size_t i = 0; i < g_Links.size(); ++i) {
                 g_FocusItems.push_back({ FocusType::LINK, i, g_Links[i].start });
             }
             for (size_t i = 0; i < g_Inputs.size(); ++i) {
-                if (g_Inputs[i].type != L"hidden" && g_Inputs[i].hwnd) {
-                    g_FocusItems.push_back({ FocusType::INPUT, i, g_Inputs[i].start });
+                auto& input = g_Inputs[i];
+                if (input.type == L"hidden") continue;
+
+                UINT32 actualCount = 0;
+                DWRITE_HIT_TEST_METRICS hm;
+                pTextLayout->HitTestTextRange(input.start, input.length, 0, 0, &hm, 1, &actualCount);
+                if (actualCount > 0) {
+                    float x = 10.0f + hm.left;
+                    float y = 10.0f + hm.top + 4.0f;
+                    if (input.type == L"radio" || input.type == L"checkbox") {
+                        float size = hm.height * 0.8f;
+                        float offset = (hm.height - size) / 2.0f;
+                        input.rect = D2D1::RectF(x, y + offset, x + size, y + offset + size);
+                    }
+                    else {
+                        input.rect = D2D1::RectF(x, y, x + hm.width, y + hm.height - 2.0f);
+                    }
                 }
+                g_FocusItems.push_back({ FocusType::INPUT, i, input.start });
             }
             std::sort(g_FocusItems.begin(), g_FocusItems.end(), [](const FocusItem& a, const FocusItem& b) {
                 return a.start < b.start;
                 });
         }
     }
-    PositionInputControls(hwnd);
+    if (g_hSearchEdit && g_IsSearching) {
+        int editHeight = CUSTOM_FONT_SIZE + 6;
+        MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
+    }
 }
 void Render(HWND hwnd) {
     EnsureResources(hwnd);
@@ -829,7 +730,75 @@ void Render(HWND hwnd) {
                 }
             }
         }
+        {
+            std::lock_guard<std::mutex> lock(g_ContentMutex);
+            for (size_t i = 0; i < g_Inputs.size(); ++i) {
+                auto& input = g_Inputs[i];
+                if (input.type == L"hidden") continue;
+                D2D1_RECT_F r = input.rect;
+                r.top -= g_ScrollY; r.bottom -= g_ScrollY;
+                bool isFocused = (g_FocusIndex >= 0 && g_FocusItems[g_FocusIndex].type == FocusType::INPUT && g_FocusItems[g_FocusIndex].index == i);
+                if (input.type == L"button" || input.type == L"submit" || input.type == L"reset") {
+                    pRT->FillRectangle(r, pControlBgBrush);
+                    pRT->DrawRectangle(r, isFocused ? pFocusBrush : pControlBorderBrush, isFocused ? 2.0f : 1.0f);
+                }
+                else if (input.type == L"radio") {
+                    D2D1_POINT_2F center = D2D1::Point2F((r.left + r.right) / 2.0f, (r.top + r.bottom) / 2.0f);
+                    float radius = (r.right - r.left) / 2.0f;
+                    pRT->FillEllipse(D2D1::Ellipse(center, radius, radius), pControlBgBrush);
+                    pRT->DrawEllipse(D2D1::Ellipse(center, radius, radius), isFocused ? pFocusBrush : pControlBorderBrush, isFocused ? 2.0f : 1.0f);
+                    if (input.checked) pRT->FillEllipse(D2D1::Ellipse(center, radius * 0.5f, radius * 0.5f), pControlFillBrush);
+                }
+                else if (input.type == L"checkbox") {
+                    pRT->FillRectangle(r, pControlBgBrush);
+                    pRT->DrawRectangle(r, isFocused ? pFocusBrush : pControlBorderBrush, isFocused ? 2.0f : 1.0f);
+                    if (input.checked) {
+                        pRT->DrawLine(D2D1::Point2F(r.left + 2, r.top + 2), D2D1::Point2F(r.right - 2, r.bottom - 2), pControlFillBrush, 2.0f);
+                        pRT->DrawLine(D2D1::Point2F(r.left + 2, r.bottom - 2), D2D1::Point2F(r.right - 2, r.top + 2), pControlFillBrush, 2.0f);
+                    }
+                }
+                else {
+                    pRT->FillRectangle(r, pControlBgBrush);
+                    pRT->DrawRectangle(r, isFocused ? pFocusBrush : pControlBorderBrush, isFocused ? 2.0f : 1.0f);
+                }
+            }
+        }
         pRT->DrawTextLayout(D2D1::Point2F(10.0f, 10.0f - g_ScrollY), pTextLayout, pTextBrush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        {
+            std::lock_guard<std::mutex> lock(g_ContentMutex);
+            for (size_t i = 0; i < g_Inputs.size(); ++i) {
+                auto& input = g_Inputs[i];
+                if (input.type == L"text" || input.type == L"password") {
+                    D2D1_RECT_F r = input.rect; r.top -= g_ScrollY; r.bottom -= g_ScrollY;
+                    bool isFocused = (g_FocusIndex >= 0 && g_FocusItems[g_FocusIndex].type == FocusType::INPUT && g_FocusItems[g_FocusIndex].index == i);
+                    std::wstring displayVal = (input.type == L"password") ? std::wstring(input.value.length(), L'*') : input.value;
+                    IDWriteTextLayout* pInputLayout = nullptr;
+                    pDWriteFactory->CreateTextLayout(displayVal.c_str(), (UINT32)displayVal.length(), pTextFormat, r.right - r.left - 4.0f, r.bottom - r.top, &pInputLayout);
+                    if (pInputLayout) {
+                        pInputLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        pRT->DrawTextLayout(D2D1::Point2F(r.left + 2.0f, r.top), pInputLayout, pControlTextBrush);
+                        if (isFocused && (GetTickCount64() % 1000) < 500) {
+                            DWRITE_HIT_TEST_METRICS hmCaret;
+                            float cX = 0, cY = 0;
+                            pInputLayout->HitTestTextPosition((UINT32)displayVal.length(), FALSE, &cX, &cY, &hmCaret);
+                            pRT->DrawLine(
+                                D2D1::Point2F(r.left + 2.0f + cX, r.top + 2.0f),
+                                D2D1::Point2F(r.left + 2.0f + cX, r.bottom - 2.0f),
+                                pControlTextBrush, 1.0f
+                            );
+                        }
+                        pInputLayout->Release();
+                    }
+                    else if (isFocused && (GetTickCount64() % 1000) < 500) {
+                        pRT->DrawLine(
+                            D2D1::Point2F(r.left + 2.0f, r.top + 2.0f),
+                            D2D1::Point2F(r.left + 2.0f, r.bottom - 2.0f),
+                            pControlTextBrush, 1.0f
+                        );
+                    }
+                }
+            }
+        }
         if (pHrBrush) {
             std::lock_guard<std::mutex> lock(g_ContentMutex);
             for (const auto& hr : g_Hrs) {
@@ -863,9 +832,7 @@ void Render(HWND hwnd) {
         }
     }
     std::string displayUrl = "";
-    if (g_IsHoveringLink && !g_HoveredUrl.empty()) {
-        displayUrl = g_HoveredUrl;
-    }
+    if (g_IsHoveringLink && !g_HoveredUrl.empty()) displayUrl = g_HoveredUrl;
     else if (g_FocusIndex >= 0 && g_FocusIndex < (int)g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::LINK) {
         displayUrl = g_Links[g_FocusItems[g_FocusIndex].index].url;
     }
@@ -904,8 +871,39 @@ UINT32 GetTextPositionFromMouse(int mouseX, int mouseY, BOOL* outIsInside = null
 void UpdateScrollPos(HWND hwnd, float newY) {
     g_ScrollY = max(0.0f, min(newY, g_MaxScrollY));
     SetScrollPos(hwnd, SB_VERT, (int)g_ScrollY, TRUE);
-    PositionInputControls(hwnd);
     InvalidateRect(hwnd, NULL, FALSE);
+}
+void UpdateImePosition(HWND hwnd) {
+    std::lock_guard<std::mutex> lock(g_ContentMutex);
+    if (g_FocusIndex < 0 || g_FocusIndex >= g_FocusItems.size() || g_FocusItems[g_FocusIndex].type != FocusType::INPUT) return;
+    auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+    if (input.type != L"text" && input.type != L"password") return;
+    HIMC hImc = ImmGetContext(hwnd);
+    if (!hImc) return;
+    std::wstring displayVal = (input.type == L"password") ? std::wstring(input.value.length(), L'*') : input.value;
+    IDWriteTextLayout* pInputLayout = nullptr;
+    float cX = 0;
+    if (pDWriteFactory && SUCCEEDED(pDWriteFactory->CreateTextLayout(displayVal.c_str(), (UINT32)displayVal.length(), pTextFormat, input.rect.right - input.rect.left - 4.0f, input.rect.bottom - input.rect.top, &pInputLayout))) {
+        pInputLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        DWRITE_HIT_TEST_METRICS hmCaret;
+        float cY = 0;
+        pInputLayout->HitTestTextPosition((UINT32)displayVal.length(), FALSE, &cX, &cY, &hmCaret);
+        pInputLayout->Release();
+    }
+    COMPOSITIONFORM cf = { 0 };
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos.x = (LONG)(input.rect.left + 2.0f + cX);
+    cf.ptCurrentPos.y = (LONG)(input.rect.top + 2.0f - g_ScrollY);
+    ImmSetCompositionWindow(hImc, &cf);
+    LOGFONTW lf = { 0 };
+    if (g_hCustomFont) {
+        GetObjectW(g_hCustomFont, sizeof(LOGFONTW), &lf);
+    }
+    else {
+        GetObjectW(GetStockObject(DEFAULT_GUI_FONT), sizeof(LOGFONTW), &lf);
+    }
+    ImmSetCompositionFontW(hImc, &lf);
+    ImmReleaseContext(hwnd, hImc);
 }
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -916,9 +914,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         {
             std::lock_guard<std::mutex> lock(g_ContentMutex);
             if (page) {
-                for (auto& input : g_Inputs) {
-                    if (input.hwnd) DestroyWindow(input.hwnd);
-                }
                 g_WebPageContent = page->text;
                 g_PageTitle = page->title;
                 g_Links = page->links;
@@ -958,45 +953,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_TIMER:
         if (wp == TIMER_AUTOSCROLL && g_IsSelecting) {
-            POINT pt;
-            GetCursorPos(&pt);
-            ScreenToClient(hwnd, &pt);
-            RECT rc;
-            GetClientRect(hwnd, &rc);
+            POINT pt; GetCursorPos(&pt); ScreenToClient(hwnd, &pt);
+            RECT rc; GetClientRect(hwnd, &rc);
             bool needsScroll = false;
             float scrollAmount = 0.0f;
-            if (pt.y < 0) {
-                scrollAmount = (float)pt.y;
-                needsScroll = true;
-            }
-            else if (pt.y > rc.bottom) {
-                scrollAmount = (float)(pt.y - rc.bottom);
-                needsScroll = true;
-            }
+            if (pt.y < 0) { scrollAmount = (float)pt.y; needsScroll = true; }
+            else if (pt.y > rc.bottom) { scrollAmount = (float)(pt.y - rc.bottom); needsScroll = true; }
             if (needsScroll) {
                 scrollAmount = max(-50.0f, min(scrollAmount, 50.0f));
                 UpdateScrollPos(hwnd, g_ScrollY + scrollAmount);
                 UINT32 currentPos = GetTextPositionFromMouse(pt.x, pt.y);
                 if (currentPos != UINT32_MAX && g_SelectionAnchor != UINT32_MAX) {
-                    if (currentPos < g_SelectionAnchor) {
-                        g_SelectionStart = currentPos;
-                        g_SelectionLength = g_SelectionAnchor - currentPos;
-                    }
-                    else {
-                        g_SelectionStart = g_SelectionAnchor;
-                        g_SelectionLength = currentPos - g_SelectionAnchor;
-                    }
+                    if (currentPos < g_SelectionAnchor) { g_SelectionStart = currentPos; g_SelectionLength = g_SelectionAnchor - currentPos; }
+                    else { g_SelectionStart = g_SelectionAnchor; g_SelectionLength = currentPos - g_SelectionAnchor; }
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
+            }
+        }
+        if (wp == TIMER_CARET) {
+            if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+                auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+                if (input.type == L"text" || input.type == L"password") InvalidateRect(hwnd, NULL, FALSE);
             }
         }
         return 0;
     case WM_EXECUTE_SEARCH:
     {
-        if (g_LastSearchQuery.empty()) {
-            PostMessage(hwnd, WM_CANCEL_SEARCH, 0, 0);
-            return 0;
-        }
+        if (g_LastSearchQuery.empty()) { PostMessage(hwnd, WM_CANCEL_SEARCH, 0, 0); return 0; }
         bool forward = (wp != 0);
         std::wstring lowerContent, lowerQuery;
         {
@@ -1007,9 +990,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         lowerQuery = g_LastSearchQuery;
         std::transform(lowerQuery.begin(), lowerQuery.end(), lowerQuery.begin(), ::towlower);
         size_t startPos = g_SelectionStart;
-        if (g_SelectionLength > 0) {
-            startPos += (forward ? 1 : -1);
-        }
+        if (g_SelectionLength > 0) startPos += (forward ? 1 : -1);
         size_t foundPos = std::wstring::npos;
         if (forward) {
             foundPos = lowerContent.find(lowerQuery, startPos);
@@ -1023,8 +1004,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_SelectionStart = (UINT32)foundPos;
             g_SelectionLength = (UINT32)lowerQuery.length();
             if (pTextLayout) {
-                UINT32 actualCount = 0;
-                DWRITE_HIT_TEST_METRICS hm;
+                UINT32 actualCount = 0; DWRITE_HIT_TEST_METRICS hm;
                 pTextLayout->HitTestTextRange(g_SelectionStart, g_SelectionLength, 0, 0, &hm, 1, &actualCount);
                 if (actualCount > 0) {
                     RECT rc; GetClientRect(hwnd, &rc);
@@ -1033,14 +1013,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         g_ScrollY = targetY - (rc.bottom / 2.0f);
                         g_ScrollY = max(0.0f, min(g_ScrollY, g_MaxScrollY));
                         SetScrollPos(hwnd, SB_VERT, (int)g_ScrollY, TRUE);
-                        PositionInputControls(hwnd);
                     }
                 }
             }
         }
-        else {
-            MessageBeep(MB_OK);
-        }
+        else MessageBeep(MB_OK);
         PostMessage(hwnd, WM_CANCEL_SEARCH, 0, 0);
         InvalidateRect(hwnd, NULL, FALSE);
     }
@@ -1061,11 +1038,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return 0;
     case WM_CANCEL_SEARCH:
-        if (g_IsSearching) {
-            ShowWindow(g_hSearchEdit, SW_HIDE);
-            SetFocus(hwnd);
-            g_IsSearching = false;
-        }
+        if (g_IsSearching) { ShowWindow(g_hSearchEdit, SW_HIDE); SetFocus(hwnd); g_IsSearching = false; }
         return 0;
     case WM_DO_TAB:
     {
@@ -1076,10 +1049,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_FocusIndex = (int)g_FocusItems.size() - 1;
                 if (g_SelectionAnchor != UINT32_MAX) {
                     for (int i = (int)g_FocusItems.size() - 1; i >= 0; --i) {
-                        if (g_FocusItems[i].start <= g_SelectionAnchor) {
-                            g_FocusIndex = i;
-                            break;
-                        }
+                        if (g_FocusItems[i].start <= g_SelectionAnchor) { g_FocusIndex = i; break; }
                     }
                 }
             }
@@ -1087,90 +1057,63 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_FocusIndex = 0;
                 if (g_SelectionAnchor != UINT32_MAX) {
                     for (int i = 0; i < (int)g_FocusItems.size(); ++i) {
-                        if (g_FocusItems[i].start > g_SelectionAnchor) {
-                            g_FocusIndex = i;
-                            break;
-                        }
+                        if (g_FocusItems[i].start > g_SelectionAnchor) { g_FocusIndex = i; break; }
                     }
                 }
             }
         }
         else {
-            if (shift) {
-                g_FocusIndex--;
-                if (g_FocusIndex < 0) g_FocusIndex = (int)g_FocusItems.size() - 1;
-            }
-            else {
-                g_FocusIndex++;
-                if (g_FocusIndex >= (int)g_FocusItems.size()) g_FocusIndex = 0;
-            }
+            if (shift) { g_FocusIndex--; if (g_FocusIndex < 0) g_FocusIndex = (int)g_FocusItems.size() - 1; }
+            else { g_FocusIndex++; if (g_FocusIndex >= (int)g_FocusItems.size()) g_FocusIndex = 0; }
         }
         ApplyFocus(hwnd);
     }
     return 0;
-    case WM_SYNC_FOCUS:
-    {
-        HWND hFocused = (HWND)wp;
-        for (size_t i = 0; i < g_FocusItems.size(); ++i) {
-            if (g_FocusItems[i].type == FocusType::INPUT && g_Inputs[g_FocusItems[i].index].hwnd == hFocused) {
-                g_FocusIndex = (int)i;
-                InvalidateRect(hwnd, NULL, FALSE);
-                break;
-            }
-        }
-    }
-    return 0;
     case WM_SUBMIT_FORM:
     {
-        if (g_Inputs.empty()) return 0;
         std::string targetAction = "";
         std::string targetMethod = "GET";
         std::string queryString = "";
-        CURL* curl = curl_easy_init();
-        int submitFormIndex = -1;
-        if (g_FocusIndex >= 0 && g_FocusIndex < (int)g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
-            submitFormIndex = (int)g_FocusItems[g_FocusIndex].index;
-        }
-        if (submitFormIndex != -1) {
-            targetAction = g_Inputs[submitFormIndex].action;
-            targetMethod = g_Inputs[submitFormIndex].method;
-        }
-        for (const auto& input : g_Inputs) {
-            if (targetAction.empty() && !input.action.empty()) {
-                targetAction = input.action;
-                targetMethod = input.method;
+        std::string finalUrl = "";
+        {
+            std::lock_guard<std::mutex> lock(g_ContentMutex);
+            if (g_Inputs.empty()) return 0;
+            CURL* curl = curl_easy_init();
+            int submitFormIndex = -1;
+            if (g_FocusIndex >= 0 && g_FocusIndex < (int)g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+                submitFormIndex = (int)g_FocusItems[g_FocusIndex].index;
             }
-            if (!input.action.empty() && input.action != targetAction && targetAction != "") continue;
-            if (input.name.empty()) continue;
-            if (input.type == L"button" || input.type == L"submit" || input.type == L"reset") continue;
-            std::wstring val = input.value;
-            if (input.hwnd && input.type != L"hidden") {
-                if (input.type == L"radio" || input.type == L"checkbox") {
-                    if (SendMessage(input.hwnd, BM_GETCHECK, 0, 0) != BST_CHECKED) {
-                        continue;
+            if (submitFormIndex != -1) {
+                targetAction = g_Inputs[submitFormIndex].action;
+                targetMethod = g_Inputs[submitFormIndex].method;
+            }
+            for (const auto& input : g_Inputs) {
+                if (targetAction.empty() && !input.action.empty()) {
+                    targetAction = input.action; targetMethod = input.method;
+                }
+                if (!input.action.empty() && input.action != targetAction && targetAction != "") continue;
+                if (input.name.empty()) continue;
+                if (input.type == L"button" || input.type == L"submit" || input.type == L"reset") {
+                    if (submitFormIndex != -1 && &input != &g_Inputs[submitFormIndex]) continue;
+                }
+                std::wstring val = input.value;
+                if (input.type != L"hidden") {
+                    if (input.type == L"radio" || input.type == L"checkbox") {
+                        if (!input.checked) continue;
+                        if (val.empty()) val = L"on";
                     }
-                    if (val.empty()) val = L"on";
                 }
-                else {
-                    wchar_t buf[4096] = { 0 };
-                    GetWindowText(input.hwnd, buf, 4096);
-                    val = buf;
-                }
+                std::string n8 = WideToNarrow(input.name); std::string v8 = WideToNarrow(val);
+                char* escName = curl_easy_escape(curl, n8.c_str(), (int)n8.length());
+                char* escVal = curl_easy_escape(curl, v8.c_str(), (int)v8.length());
+                if (!queryString.empty()) queryString += "&";
+                queryString += (escName ? escName : ""); queryString += "="; queryString += (escVal ? escVal : "");
+                if (escName) curl_free(escName); if (escVal) curl_free(escVal);
             }
-            std::string n8 = WideToNarrow(input.name);
-            std::string v8 = WideToNarrow(val);
-            char* escName = curl_easy_escape(curl, n8.c_str(), (int)n8.length());
-            char* escVal = curl_easy_escape(curl, v8.c_str(), (int)v8.length());
-            if (!queryString.empty()) queryString += "&";
-            queryString += (escName ? escName : "");
-            queryString += "=";
-            queryString += (escVal ? escVal : "");
-            if (escName) curl_free(escName);
-            if (escVal) curl_free(escVal);
+            if (curl) curl_easy_cleanup(curl);
+            if (targetAction.empty() && !g_History.empty()) targetAction = g_History.back();
+            finalUrl = targetAction;
         }
-        if (curl) curl_easy_cleanup(curl);
-        if (targetAction.empty() && !g_History.empty()) targetAction = g_History.back();
-        std::string finalUrl = targetAction;
         if (targetMethod == "POST") {
             NavigateTo(hwnd, finalUrl, queryString);
         }
@@ -1183,33 +1126,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
     }
     return 0;
-    case WM_COMMAND:
-        if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) >= 1000) {
-            int index = LOWORD(wp) - 1000;
-            bool doSubmit = false;
-            {
-                std::lock_guard<std::mutex> lock(g_ContentMutex);
-                if (index >= 0 && index < (int)g_Inputs.size()) {
-                    std::wstring t = g_Inputs[index].type;
-                    if (t == L"submit" || t == L"button") {
-                        doSubmit = true;
-                    }
-                    else if (t == L"radio") {
-                        std::wstring rName = g_Inputs[index].name;
-                        for (size_t i = 0; i < g_Inputs.size(); ++i) {
-                            if (i != index && g_Inputs[i].type == L"radio" && g_Inputs[i].name == rName) {
-                                SendMessage(g_Inputs[i].hwnd, BM_SETCHECK, BST_UNCHECKED, 0);
-                            }
-                        }
-                    }
-                }
-            }
-            if (doSubmit) {
-                PostMessage(hwnd, WM_SUBMIT_FORM, 0, 0);
-            }
-            return 0;
-        }
-        return DefWindowProc(hwnd, msg, wp, lp);
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             SetCursor(LoadCursor(NULL, g_IsHoveringLink ? IDC_HAND : IDC_IBEAM));
@@ -1230,19 +1146,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int type = get_char_type(g_WebPageContent[currentPos]);
                 if (type != 0) {
                     UINT32 start = currentPos;
-                    while (start > 0 && get_char_type(g_WebPageContent[start - 1]) == type) {
-                        start--;
-                    }
+                    while (start > 0 && get_char_type(g_WebPageContent[start - 1]) == type) start--;
                     UINT32 end = currentPos;
-                    while (end < g_WebPageContent.length() && get_char_type(g_WebPageContent[end]) == type) {
-                        end++;
-                    }
-                    g_SelectionStart = start;
-                    g_SelectionLength = end - start;
-                    g_SelectionAnchor = start;
-                    g_IsSelecting = true;
-                    SetCapture(hwnd);
-                    SetTimer(hwnd, TIMER_AUTOSCROLL, 30, NULL);
+                    while (end < g_WebPageContent.length() && get_char_type(g_WebPageContent[end]) == type) end++;
+                    g_SelectionStart = start; g_SelectionLength = end - start; g_SelectionAnchor = start;
+                    g_IsSelecting = true; SetCapture(hwnd); SetTimer(hwnd, TIMER_AUTOSCROLL, 30, NULL);
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
             }
@@ -1250,64 +1158,100 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONDOWN:
+    {
         SetFocus(hwnd);
+        float mouseX = (float)GET_X_LPARAM(lp);
+        float mouseY = (float)GET_Y_LPARAM(lp);
+        float docY = mouseY + g_ScrollY;
+        bool clickedControl = false;
+        {
+            std::lock_guard<std::mutex> lock(g_ContentMutex);
+            for (size_t i = 0; i < g_Inputs.size(); ++i) {
+                auto& input = g_Inputs[i];
+                if (input.type == L"hidden") continue;
+                if (mouseX >= input.rect.left && mouseX <= input.rect.right && docY >= input.rect.top && docY <= input.rect.bottom) {
+                    clickedControl = true;
+                    for (size_t f = 0; f < g_FocusItems.size(); ++f) {
+                        if (g_FocusItems[f].type == FocusType::INPUT && g_FocusItems[f].index == i) {
+                            g_FocusIndex = (int)f; break;
+                        }
+                    }
+                    if (input.type == L"checkbox") input.checked = !input.checked;
+                    else if (input.type == L"radio") {
+                        input.checked = true;
+                        for (auto& other : g_Inputs) {
+                            if (&other != &input && other.type == L"radio" && other.name == input.name) other.checked = false;
+                        }
+                    }
+                    else if (input.type == L"button" || input.type == L"submit" || input.type == L"reset") {
+                        PostMessage(hwnd, WM_SUBMIT_FORM, 0, 0);
+                    }
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    break;
+                }
+            }
+        }
+        if (clickedControl) return 0;
         SetCapture(hwnd);
         g_IsSelecting = true;
         SetTimer(hwnd, TIMER_AUTOSCROLL, 30, NULL);
         g_SelectionAnchor = GetTextPositionFromMouse(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         g_SelectionLength = 0;
         g_FocusIndex = -1;
-        if (g_SelectionAnchor != UINT32_MAX) {
-            g_SelectionStart = g_SelectionAnchor;
-        }
-        else {
-            g_SelectionStart = 0;
-            g_SelectionAnchor = 0;
-        }
+        if (g_SelectionAnchor != UINT32_MAX) g_SelectionStart = g_SelectionAnchor;
+        else { g_SelectionStart = 0; g_SelectionAnchor = 0; }
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
+    }
     case WM_MOUSEMOVE:
     {
         BOOL isInside = FALSE;
         UINT32 currentPos = GetTextPositionFromMouse(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &isInside);
         bool foundLink = false;
         std::string targetUrl = "";
-        if (isInside && currentPos != UINT32_MAX && !g_IsSelecting) {
+        float mouseX = (float)GET_X_LPARAM(lp);
+        float mouseY = (float)GET_Y_LPARAM(lp);
+        float docY = mouseY + g_ScrollY;
+        bool hoverControl = false;
+        {
             std::lock_guard<std::mutex> lock(g_ContentMutex);
-            for (const auto& link : g_Links) {
-                if (currentPos >= link.start && currentPos < link.start + link.length) {
-                    foundLink = true; targetUrl = link.url; break;
+            for (const auto& input : g_Inputs) {
+                if (input.type == L"hidden") continue;
+                if (mouseX >= input.rect.left && mouseX <= input.rect.right && docY >= input.rect.top && docY <= input.rect.bottom) {
+                    hoverControl = true; break;
+                }
+            }
+            if (isInside && currentPos != UINT32_MAX && !g_IsSelecting && !hoverControl) {
+                for (const auto& link : g_Links) {
+                    if (currentPos >= link.start && currentPos < link.start + link.length) {
+                        foundLink = true; targetUrl = link.url; break;
+                    }
                 }
             }
         }
         if (g_IsHoveringLink != foundLink || (foundLink && g_HoveredUrl != targetUrl)) {
-            g_IsHoveringLink = foundLink;
-            g_HoveredUrl = targetUrl;
+            g_IsHoveringLink = foundLink; g_HoveredUrl = targetUrl;
             SetCursor(LoadCursor(NULL, g_IsHoveringLink ? IDC_HAND : IDC_IBEAM));
             InvalidateRect(hwnd, NULL, FALSE);
         }
         if (g_IsSelecting && currentPos != UINT32_MAX && g_SelectionAnchor != UINT32_MAX) {
-            if (currentPos < g_SelectionAnchor) {
-                g_SelectionStart = currentPos; g_SelectionLength = g_SelectionAnchor - currentPos;
-            }
-            else {
-                g_SelectionStart = g_SelectionAnchor; g_SelectionLength = currentPos - g_SelectionAnchor;
-            }
+            if (currentPos < g_SelectionAnchor) { g_SelectionStart = currentPos; g_SelectionLength = g_SelectionAnchor - currentPos; }
+            else { g_SelectionStart = g_SelectionAnchor; g_SelectionLength = currentPos - g_SelectionAnchor; }
             InvalidateRect(hwnd, NULL, FALSE);
         }
     }
     return 0;
     case WM_LBUTTONUP:
         if (g_IsSelecting) {
-            KillTimer(hwnd, TIMER_AUTOSCROLL);
-            ReleaseCapture();
-            g_IsSelecting = false;
-            if (g_SelectionLength == 0 && g_IsHoveringLink && !g_HoveredUrl.empty()) {
-                NavigateTo(hwnd, g_HoveredUrl);
-            }
+            KillTimer(hwnd, TIMER_AUTOSCROLL); ReleaseCapture(); g_IsSelecting = false;
+            if (g_SelectionLength == 0 && g_IsHoveringLink && !g_HoveredUrl.empty()) NavigateTo(hwnd, g_HoveredUrl);
         }
         return 0;
+    case WM_IME_STARTCOMPOSITION:
+        UpdateImePosition(hwnd);
+        return DefWindowProc(hwnd, msg, wp, lp);
     case WM_CHAR:
+        if (g_IsSearching) return 0;
         if (wp == '/') {
             if (!g_hSearchEdit) {
                 g_hSearchEdit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
@@ -1322,18 +1266,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
             SetWindowText(g_hSearchEdit, g_LastSearchQuery.c_str());
             SendMessage(g_hSearchEdit, EM_SETSEL, 0, -1);
-            ShowWindow(g_hSearchEdit, SW_SHOW);
-            SetFocus(g_hSearchEdit);
+            ShowWindow(g_hSearchEdit, SW_SHOW); SetFocus(g_hSearchEdit);
             g_IsSearching = true;
             return 0;
         }
-        if (wp == 'n') {
-            PostMessage(hwnd, WM_EXECUTE_SEARCH, 1, 0);
-            return 0;
-        }
-        if (wp == 'N') {
-            PostMessage(hwnd, WM_EXECUTE_SEARCH, 0, 0);
-            return 0;
+        if (wp == 'n') { PostMessage(hwnd, WM_EXECUTE_SEARCH, 1, 0); return 0; }
+        if (wp == 'N') { PostMessage(hwnd, WM_EXECUTE_SEARCH, 0, 0); return 0; }
+        if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+            std::lock_guard<std::mutex> lock(g_ContentMutex);
+            auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+            if (input.type != L"button" && input.type != L"submit" && input.type != L"reset" && input.type != L"radio" && input.type != L"checkbox") {
+                if (wp == '\b') {
+                    if (!input.value.empty()) input.value.pop_back();
+                }
+                else if (wp >= 32) {
+                    input.value += (wchar_t)wp;
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
         }
         break;
     case WM_SYSKEYDOWN:
@@ -1344,51 +1295,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == VK_ESCAPE) {
             bool needsRepaint = false;
             if (g_SelectionLength > 0) {
-                g_SelectionLength = 0;
-                g_SelectionStart = 0;
-                g_SelectionAnchor = UINT32_MAX;
-                needsRepaint = true;
+                g_SelectionLength = 0; g_SelectionStart = 0; g_SelectionAnchor = UINT32_MAX; needsRepaint = true;
             }
-            if (g_IsSearching) {
-                PostMessage(hwnd, WM_CANCEL_SEARCH, 0, 0);
-            }
-            if (needsRepaint) {
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
+            if (g_IsSearching) PostMessage(hwnd, WM_CANCEL_SEARCH, 0, 0);
+            if (needsRepaint) InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
         if (wp == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
             std::lock_guard<std::mutex> lock(g_ContentMutex);
             g_SelectionStart = 0; g_SelectionLength = (UINT32)g_WebPageContent.length();
-            InvalidateRect(hwnd, NULL, FALSE);
-            return 0;
+            InvalidateRect(hwnd, NULL, FALSE); return 0;
         }
-        if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-            CopyToClipboard(hwnd);
-            return 0;
-        }
-        if (wp == VK_TAB) {
-            PostMessage(hwnd, WM_DO_TAB, (GetKeyState(VK_SHIFT) & 0x8000) ? 1 : 0, 0);
-            return 0;
-        }
+        if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) { CopyToClipboard(hwnd); return 0; }
+        if (wp == VK_TAB) { PostMessage(hwnd, WM_DO_TAB, (GetKeyState(VK_SHIFT) & 0x8000) ? 1 : 0, 0); return 0; }
         if (wp == VK_RETURN) {
             if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size()) {
                 if (g_FocusItems[g_FocusIndex].type == FocusType::LINK) {
                     NavigateTo(hwnd, g_Links[g_FocusItems[g_FocusIndex].index].url);
                 }
+                else if (g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+                    PostMessage(hwnd, WM_SUBMIT_FORM, 0, 0);
+                }
             }
             return 0;
+        }
+        if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+            auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+            if (wp == VK_SPACE && (input.type == L"checkbox" || input.type == L"radio" || input.type == L"button" || input.type == L"submit")) {
+                std::lock_guard<std::mutex> lock(g_ContentMutex);
+                if (input.type == L"checkbox") input.checked = !input.checked;
+                else if (input.type == L"radio") {
+                    input.checked = true;
+                    for (auto& other : g_Inputs) {
+                        if (&other != &input && other.type == L"radio" && other.name == input.name) other.checked = false;
+                    }
+                }
+                else {
+                    PostMessage(hwnd, WM_SUBMIT_FORM, 0, 0);
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            if (wp == VK_SPACE && (input.type == L"text" || input.type == L"password")) {
+                return 0;
+            }
         }
         {
             RECT rc; GetClientRect(hwnd, &rc);
             float pageHeight = max(40.0f, (float)rc.bottom - 40.0f);
+            bool isTextInputActive = false;
+            if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+                auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+                if (input.type == L"text" || input.type == L"password") {
+                    isTextInputActive = true;
+                }
+            }
             switch (wp) {
             case VK_NEXT:  UpdateScrollPos(hwnd, g_ScrollY + pageHeight); return 0;
             case VK_PRIOR: UpdateScrollPos(hwnd, g_ScrollY - pageHeight); return 0;
             case VK_HOME:  UpdateScrollPos(hwnd, 0.0f); return 0;
             case VK_END:   UpdateScrollPos(hwnd, g_MaxScrollY); return 0;
             }
-            if (!g_IsSearching) {
+            if (!g_IsSearching && !isTextInputActive) {
                 switch (wp) {
                 case VK_DOWN: case 'J': UpdateScrollPos(hwnd, g_ScrollY + 40.0f); break;
                 case VK_UP:   case 'K': UpdateScrollPos(hwnd, g_ScrollY - 40.0f); break;
@@ -1448,9 +1416,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR pCmdLine, int n) {
             IDWriteFontSet* pFontSet = nullptr;
             pSetBuilder->CreateFontSet(&pFontSet);
             pDWriteFactory5->CreateFontCollectionFromFontSet(pFontSet, &pCustomFontCollection);
-            pFontSet->Release();
-            pSetBuilder->Release();
-            pFontFile->Release();
+            pFontSet->Release(); pSetBuilder->Release(); pFontFile->Release();
         }
     }
     if (pCustomFontCollection) {
@@ -1470,6 +1436,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR pCmdLine, int n) {
     wc.hCursor = LoadCursor(NULL, IDC_IBEAM);
     RegisterClass(&wc);
     HWND hwnd = CreateWindow(L"t2t", L"t2t", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN, 100, 100, 800, 600, 0, 0, hi, 0);
+    SetTimer(hwnd, TIMER_CARET, 500, NULL);
     ShowWindow(hwnd, n);
     std::wstring cmd = pCmdLine;
     if (cmd.length() >= 2 && cmd.front() == L'"' && cmd.back() == L'"') cmd = cmd.substr(1, cmd.length() - 2);
@@ -1494,6 +1461,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR pCmdLine, int n) {
     if (pHrBrush) pHrBrush->Release();
     if (pStatusBarBrush) pStatusBarBrush->Release();
     if (pStatusTextBrush) pStatusTextBrush->Release();
+    if (pControlBgBrush) pControlBgBrush->Release();
+    if (pControlBorderBrush) pControlBorderBrush->Release();
+    if (pControlFillBrush) pControlFillBrush->Release();
+    if (pControlTextBrush) pControlTextBrush->Release();
     if (pRT) pRT->Release();
     if (pD2DFactory) pD2DFactory->Release();
     curl_global_cleanup();
