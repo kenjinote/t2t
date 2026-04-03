@@ -14,7 +14,11 @@
 #include <mutex>
 #include <algorithm>
 #include <atomic>
+#include <fstream>
+#include <sstream>
+#include <shlobj.h>
 #include "resource.h"
+
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "libcurl.lib")
 #pragma comment(lib, "Ws2_32.lib")
@@ -27,6 +31,7 @@
 #pragma comment(lib, "zlib.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
+
 #define WM_CONTENT_LOADED (WM_APP + 1)
 #define WM_SUBMIT_FORM    (WM_APP + 2) 
 #define WM_DO_TAB         (WM_APP + 3) 
@@ -34,10 +39,14 @@
 #define WM_EXECUTE_SEARCH (WM_APP + 5) 
 #define WM_CANCEL_SEARCH  (WM_APP + 6) 
 #define WM_EXECUTE_URL    (WM_APP + 7) 
+
 #define TIMER_AUTOSCROLL  1001
 #define TIMER_CARET       1002
+#define TIMER_STATUS      1003 // ステータスメッセージ消去用タイマー
+
 const wchar_t* CUSTOM_FONT_FAMILY = L"ノスタルドット（M+）";
 const int CUSTOM_FONT_SIZE = 24;
+
 ID2D1Factory* pD2DFactory = nullptr;
 ID2D1HwndRenderTarget* pRT = nullptr;
 ID2D1SolidColorBrush* pTextBrush = nullptr;
@@ -51,11 +60,13 @@ ID2D1SolidColorBrush* pControlBgBrush = nullptr;
 ID2D1SolidColorBrush* pControlBorderBrush = nullptr;
 ID2D1SolidColorBrush* pControlFillBrush = nullptr;
 ID2D1SolidColorBrush* pControlTextBrush = nullptr;
+
 IDWriteFactory* pDWriteFactory = nullptr;
 IDWriteTextFormat* pTextFormat = nullptr;
 IDWriteTextLayout* pTextLayout = nullptr;
 HFONT g_hCustomFont = nullptr;
 HANDLE g_hGdiFont = nullptr;
+
 struct Hyperlink { UINT32 start; UINT32 length; std::string url; };
 struct HrElement { UINT32 textPosition; };
 struct FormInput {
@@ -68,6 +79,8 @@ struct FormInput {
     std::string method;
     bool checked;
     D2D1_RECT_F rect;
+    int caretPos = 0;
+    int selAnchor = 0;
 };
 enum class FocusType { LINK, INPUT };
 struct FocusItem {
@@ -75,6 +88,14 @@ struct FocusItem {
     size_t index;
     UINT32 start;
 };
+
+struct Bookmark {
+    std::string url;
+    std::wstring title;
+};
+std::vector<Bookmark> g_Bookmarks;
+std::string g_AppDir = "";
+
 std::wstring g_WebPageContent = L"Loading...";
 std::wstring g_PageTitle = L"t2t";
 std::vector<Hyperlink> g_Links;
@@ -91,6 +112,7 @@ UINT32 g_SelectionAnchor = UINT32_MAX;
 UINT32 g_SelectionStart = 0;
 UINT32 g_SelectionLength = 0;
 bool g_IsSelecting = false;
+bool g_IsInputSelecting = false;
 bool g_IsHoveringLink = false;
 std::string g_HoveredUrl = "";
 std::vector<std::string> g_History;
@@ -100,11 +122,17 @@ bool g_IsSearching = false;
 bool g_IsUrlMode = false;
 std::wstring g_LastSearchQuery = L"";
 WNDPROC g_OldSearchEditProc = nullptr;
+
+// 一時的なステータスメッセージ用変数
+std::wstring g_StatusMessage = L"";
+ULONGLONG g_StatusMessageTime = 0;
+
 void NavigateTo(HWND hwnd, const std::string& url, const std::string& postData = "");
 void GoBack(HWND hwnd);
 void GoForward(HWND hwnd);
 void ReloadCurrentPage(HWND hwnd);
 void OpenAddressBar(HWND hwnd);
+
 std::string WideToNarrow(const std::wstring& wstr) {
     if (wstr.empty()) return "";
     int size = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, NULL, 0, NULL, NULL);
@@ -113,6 +141,7 @@ std::string WideToNarrow(const std::wstring& wstr) {
     WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &narrowStr[0], size, NULL, NULL);
     return narrowStr;
 }
+
 std::wstring NarrowToWide(const std::string& str, UINT codePage = CP_UTF8) {
     if (str.empty()) return L"";
     int size = MultiByteToWideChar(codePage, 0, str.c_str(), -1, NULL, 0);
@@ -121,6 +150,60 @@ std::wstring NarrowToWide(const std::string& str, UINT codePage = CP_UTF8) {
     MultiByteToWideChar(codePage, 0, str.c_str(), -1, &wstr[0], size);
     return wstr;
 }
+
+void InitAppDir() {
+    char path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, path))) {
+        std::string appDir = std::string(path) + "\\t2t";
+        CreateDirectoryA(appDir.c_str(), NULL);
+        g_AppDir = appDir + "\\";
+    }
+    else {
+        GetModuleFileNameA(NULL, path, MAX_PATH);
+        std::string spath = path;
+        size_t pos = spath.find_last_of("\\/");
+        if (pos != std::string::npos) {
+            g_AppDir = spath.substr(0, pos) + "\\";
+        }
+    }
+}
+
+void LoadBookmarks() {
+    g_Bookmarks.clear();
+    std::ifstream file(g_AppDir + "bookmarks.html");
+    if (!file) return;
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t hrefPos = line.find("href=\"");
+        if (hrefPos != std::string::npos) {
+            hrefPos += 6;
+            size_t quotePos = line.find("\"", hrefPos);
+            if (quotePos != std::string::npos) {
+                std::string url = line.substr(hrefPos, quotePos - hrefPos);
+                size_t closeTag = line.find(">", quotePos);
+                if (closeTag != std::string::npos) {
+                    closeTag += 1;
+                    size_t endA = line.find("</a>", closeTag);
+                    if (endA != std::string::npos) {
+                        std::string titleStr = line.substr(closeTag, endA - closeTag);
+                        g_Bookmarks.push_back({ url, NarrowToWide(titleStr) });
+                    }
+                }
+            }
+        }
+    }
+}
+
+void SaveBookmarks() {
+    std::ofstream file(g_AppDir + "bookmarks.html");
+    if (!file) return;
+    file << "<html><head><meta charset=\"UTF-8\"><title>Bookmarks</title></head><body>\n";
+    for (const auto& b : g_Bookmarks) {
+        file << "<a href=\"" << b.url << "\">" << WideToNarrow(b.title) << "</a><br>\n";
+    }
+    file << "</body></html>\n";
+}
+
 bool HandleGlobalShortcuts(HWND hWnd, UINT uMsg, WPARAM wParam) {
     HWND hMain = GetParent(hWnd);
     if (hMain == NULL) {
@@ -145,9 +228,35 @@ bool HandleGlobalShortcuts(HWND hWnd, UINT uMsg, WPARAM wParam) {
             ReloadCurrentPage(hMain);
             return true;
         }
+        // --- Ctrl + B : ブックマークに追加 (メッセージ表示) ---
+        if (wParam == 'B' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            if (g_HistoryIndex >= 0 && g_HistoryIndex < (int)g_History.size()) {
+                std::string currentUrl = g_History[g_HistoryIndex];
+                if (currentUrl.find("about:") != 0) {
+                    std::lock_guard<std::mutex> lock(g_ContentMutex);
+                    bool exists = false;
+                    for (const auto& b : g_Bookmarks) {
+                        if (b.url == currentUrl) { exists = true; break; }
+                    }
+                    if (!exists) {
+                        g_Bookmarks.push_back({ currentUrl, g_PageTitle });
+                        SaveBookmarks();
+                        g_StatusMessage = L"ブックマークに保存しました: " + g_PageTitle;
+                    }
+                    else {
+                        g_StatusMessage = L"既にブックマークに登録されています";
+                    }
+                    g_StatusMessageTime = GetTickCount64();
+                    SetTimer(hMain, TIMER_STATUS, 3000, NULL); // 3秒間表示
+                    InvalidateRect(hMain, NULL, FALSE);
+                }
+            }
+            return true;
+        }
     }
     return false;
 }
+
 LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (HandleGlobalShortcuts(hWnd, uMsg, wParam)) return 0;
     if (uMsg == WM_KEYDOWN) {
@@ -180,6 +289,7 @@ LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
     }
     return CallWindowProc(g_OldSearchEditProc, hWnd, uMsg, wParam, lParam);
 }
+
 std::wstring ExtractAttribute(const std::wstring& tag, const std::wstring& attr) {
     std::wstring search = attr + L"=";
     size_t pos = 0;
@@ -203,6 +313,7 @@ std::wstring ExtractAttribute(const std::wstring& tag, const std::wstring& attr)
     }
     return L"";
 }
+
 std::string ResolveUrl(const std::string& base, const std::string& rel) {
     if (rel.empty() || rel.find("http://") == 0 || rel.find("https://") == 0 || rel.find("about:") == 0) return rel;
     if (rel[0] == '/') {
@@ -228,9 +339,11 @@ std::string ResolveUrl(const std::string& base, const std::string& rel) {
     }
     return basePath + rel;
 }
+
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
     userp->append((char*)contents, size * nmemb); return size * nmemb;
 }
+
 std::wstring GetTagName(const std::wstring& tag) {
     std::wstring name = L"";
     for (wchar_t c : tag) {
@@ -239,11 +352,13 @@ std::wstring GetTagName(const std::wstring& tag) {
     }
     return name;
 }
+
 struct ParsedPage {
     std::wstring text; std::wstring title;
     std::vector<Hyperlink> links; std::vector<FormInput> inputs;
     std::vector<HrElement> hrs;
 };
+
 UINT DetectCodePage(const std::string& html) {
     std::string lowerHtml = html;
     std::transform(lowerHtml.begin(), lowerHtml.end(), lowerHtml.begin(), ::tolower);
@@ -259,6 +374,7 @@ UINT DetectCodePage(const std::string& html) {
     }
     return CP_UTF8;
 }
+
 ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData = "") {
     std::wstring wstr;
     if (url == "about:home") {
@@ -270,11 +386,22 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             L"Web検索 (Yahoo!検索): <input type=\"text\" name=\"p\" value=\"\"> "
             L"<button type=\"submit\">検索</button>"
             L"</form><br><br>"
-            L"<h3>ブックマーク</h3>"
-            L"<a href=\"https://ja.wikipedia.org\">Wikipedia</a><br>"
-            L"<a href=\"https://lite.cnn.com\">CNN Lite</a><br><br>"
-            L"<a href=\"https://hack.jp\">hack.jp</a><br>"
-            L"<hr><br>"
+            L"<h3>ブックマーク</h3>";
+
+        if (g_Bookmarks.empty()) {
+            wstr += L"ブックマークはありません。<br>ページ閲覧中に <b>Ctrl + B</b> で追加できます。<br><br>";
+        }
+        else {
+            for (size_t i = 0; i < g_Bookmarks.size(); ++i) {
+                std::wstring wideUrl = NarrowToWide(g_Bookmarks[i].url);
+                std::wstring delUrl = L"about:delete_bookmark?index=" + std::to_wstring(i);
+                wstr += L"<a href=\"" + wideUrl + L"\">" + g_Bookmarks[i].title + L"</a> ";
+                wstr += L"&nbsp;&nbsp;<a href=\"" + delUrl + L"\">[削除]</a><br>";
+            }
+            wstr += L"<br>";
+        }
+
+        wstr += L"<hr><br>"
             L"※ショートカットキーの一覧を見るには <a href=\"about:help\">F1キー</a> を押してください。"
             L"</body></html>";
     }
@@ -285,6 +412,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             L"<b>F1</b> : このヘルプ画面を開く<br>"
             L"<b>Alt + Home</b> / <b>Ctrl + L</b> : ホーム画面 (about:home) へ移動<br>"
             L"<b>Alt + D</b> : アドレスバー (URL入力) を開く<br>"
+            L"<b>Ctrl + B</b> : 現在のページをブックマークに追加<br>"
             L"<b>F5</b> / <b>Ctrl + R</b> : ページを再読み込み (リロード)<br>"
             L"<b>Alt + ←</b> / <b>Alt + →</b> : 前のページに戻る / 次のページに進む<br><br>"
             L"<h3>◆ スクロール ＆ フォーカス</h3>"
@@ -304,7 +432,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             L"<b>Ctrl + C</b> : 選択中のテキストをクリップボードにコピー<br>"
             L"<b>q</b> : ブラウザを終了する<br><br>"
             L"<hr><br>"
-            L"t2t(v1.0.3)"
+            L"t2t(v1.0.4)"
             L"</body></html>";
     }
     else {
@@ -343,6 +471,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
     std::wstring currentBtnName = L"";
     std::wstring currentBtnVal = L"";
     std::string currentBtnAction = "";
+
     auto AppendTextChar = [&](wchar_t c) {
         if (inTitle) {
             pageTitle += c;
@@ -363,6 +492,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             }
         }
         };
+
     for (size_t i = 0; i < wstr.length(); ++i) {
         wchar_t c = wstr[i];
         if (c == L'<') { inTag = true; currentTag = L""; }
@@ -426,7 +556,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 std::string narrowAction = WideToNarrow(currentFormAction);
                 std::string resolvedAction = ResolveUrl(url, narrowAction);
                 if (type == L"hidden") {
-                    inputs.push_back({ (UINT32)stripped.length(), 0, type, name, val, resolvedAction, currentFormMethod, isChecked, D2D1::RectF() });
+                    inputs.push_back({ (UINT32)stripped.length(), 0, type, name, val, resolvedAction, currentFormMethod, isChecked, D2D1::RectF(), (int)val.length(), (int)val.length() });
                 }
                 else {
                     std::wstring placeholder;
@@ -444,7 +574,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                     }
                     int start = (int)stripped.length();
                     stripped += placeholder;
-                    inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), type, name, val, resolvedAction, currentFormMethod, isChecked, D2D1::RectF() });
+                    inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), type, name, val, resolvedAction, currentFormMethod, isChecked, D2D1::RectF(), (int)val.length(), (int)val.length() });
                     stripped += L" ";
                 }
             }
@@ -468,7 +598,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
                 std::wstring placeholder = std::wstring(3, L'\x00A0') + safeVal + std::wstring(3, L'\x00A0');
                 int start = (int)stripped.length();
                 stripped += placeholder;
-                inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), currentBtnType, currentBtnName, currentBtnVal, currentBtnAction, currentFormMethod, false, D2D1::RectF() });
+                inputs.push_back({ (UINT32)start, (UINT32)placeholder.length(), currentBtnType, currentBtnName, currentBtnVal, currentBtnAction, currentFormMethod, false, D2D1::RectF(), 0, 0 });
                 stripped += L" ";
             }
             else if (tagName == L"frame" || tagName == L"iframe") {
@@ -533,6 +663,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
     pageTitle.erase(pageTitle.find_last_not_of(L" \t\r\n") + 1);
     return { stripped, pageTitle, links, inputs, hrs };
 }
+
 void LoadUrlAsync(HWND hwnd, const std::string& url, const std::string& postData, int epoch) {
     std::thread([hwnd, url, postData, epoch]() {
         ParsedPage* page = new ParsedPage(FetchAndStripHTML(url, postData));
@@ -543,18 +674,31 @@ void LoadUrlAsync(HWND hwnd, const std::string& url, const std::string& postData
         PostMessage(hwnd, WM_CONTENT_LOADED, (WPARAM)page, 0);
         }).detach();
 }
+
 void TriggerLoad(HWND hwnd, const std::string& url, const std::string& postData = "") {
     int currentEpoch = ++g_LoadEpoch;
     SetWindowText(hwnd, L"Loading... - t2t");
     LoadUrlAsync(hwnd, url, postData, currentEpoch);
 }
+
 void NavigateTo(HWND hwnd, const std::string& url, const std::string& postData) {
+    if (url.find("about:delete_bookmark?index=") == 0) {
+        int idx = std::stoi(url.substr(28));
+        if (idx >= 0 && idx < g_Bookmarks.size()) {
+            g_Bookmarks.erase(g_Bookmarks.begin() + idx);
+            SaveBookmarks();
+        }
+        TriggerLoad(hwnd, "about:home");
+        return;
+    }
+
     if (g_HistoryIndex >= 0 && g_HistoryIndex < (int)g_History.size() - 1) g_History.resize(g_HistoryIndex + 1);
     if (g_History.empty() || g_History.back() != url) {
         g_History.push_back(url); g_HistoryIndex = (int)g_History.size() - 1;
     }
     TriggerLoad(hwnd, url, postData);
 }
+
 void GoBack(HWND hwnd) { if (g_HistoryIndex > 0) TriggerLoad(hwnd, g_History[--g_HistoryIndex]); }
 void GoForward(HWND hwnd) { if (g_HistoryIndex < (int)g_History.size() - 1) TriggerLoad(hwnd, g_History[++g_HistoryIndex]); }
 void ReloadCurrentPage(HWND hwnd) {
@@ -562,6 +706,7 @@ void ReloadCurrentPage(HWND hwnd) {
         TriggerLoad(hwnd, g_History[g_HistoryIndex]);
     }
 }
+
 void OpenAddressBar(HWND hwnd) {
     if (!g_hSearchEdit) {
         g_hSearchEdit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
@@ -583,6 +728,7 @@ void OpenAddressBar(HWND hwnd) {
     ShowWindow(g_hSearchEdit, SW_SHOW);
     SetFocus(g_hSearchEdit);
 }
+
 void CopyToClipboard(HWND hwnd) {
     if (g_SelectionLength == 0) return;
     std::wstring textToCopy;
@@ -603,6 +749,7 @@ void CopyToClipboard(HWND hwnd) {
         CloseClipboard();
     }
 }
+
 void EnsureResources(HWND hwnd) {
     if (!pRT) {
         RECT rc; GetClientRect(hwnd, &rc);
@@ -622,6 +769,7 @@ void EnsureResources(HWND hwnd) {
         pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f), &pControlTextBrush);
     }
 }
+
 void ApplyFocus(HWND hwnd) {
     if (g_FocusItems.empty()) return;
     if (g_FocusIndex < 0) g_FocusIndex = 0;
@@ -644,9 +792,10 @@ void ApplyFocus(HWND hwnd) {
             SetScrollPos(hwnd, SB_VERT, (int)g_ScrollY, TRUE);
         }
     }
-    SetFocus(hwnd); // 常にメインウィンドウがフォーカスを受け取る
+    SetFocus(hwnd);
     InvalidateRect(hwnd, NULL, FALSE);
 }
+
 void UpdateLayoutAndScrollbar(HWND hwnd) {
     if (!pDWriteFactory) return;
     EnsureResources(hwnd);
@@ -710,6 +859,7 @@ void UpdateLayoutAndScrollbar(HWND hwnd) {
         MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
     }
 }
+
 void Render(HWND hwnd) {
     EnsureResources(hwnd);
     pRT->BeginDraw();
@@ -776,11 +926,30 @@ void Render(HWND hwnd) {
                     pDWriteFactory->CreateTextLayout(displayVal.c_str(), (UINT32)displayVal.length(), pTextFormat, r.right - r.left - 4.0f, r.bottom - r.top, &pInputLayout);
                     if (pInputLayout) {
                         pInputLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                        pRT->DrawTextLayout(D2D1::Point2F(r.left + 2.0f, r.top), pInputLayout, pControlTextBrush);
+                        int selStart = min(input.caretPos, input.selAnchor);
+                        int selLen = abs(input.caretPos - input.selAnchor);
+                        float textOffsetY = -4.0f;
+                        if (isFocused && selLen > 0) {
+                            UINT32 actualCount = 0;
+                            pInputLayout->HitTestTextRange(selStart, selLen, 0, 0, nullptr, 0, &actualCount);
+                            if (actualCount > 0) {
+                                std::vector<DWRITE_HIT_TEST_METRICS> hitMetrics(actualCount);
+                                pInputLayout->HitTestTextRange(selStart, selLen, 0, 0, hitMetrics.data(), actualCount, &actualCount);
+                                for (UINT32 j = 0; j < actualCount; ++j) {
+                                    D2D1_RECT_F sRect = D2D1::RectF(
+                                        r.left + 2.0f + hitMetrics[j].left, r.top + textOffsetY + hitMetrics[j].top,
+                                        r.left + 2.0f + hitMetrics[j].left + hitMetrics[j].width, r.top + textOffsetY + hitMetrics[j].top + hitMetrics[j].height
+                                    );
+                                    pRT->FillRectangle(sRect, pSelectionBrush);
+                                }
+                            }
+                        }
+                        pRT->DrawTextLayout(D2D1::Point2F(r.left + 2.0f, r.top + textOffsetY), pInputLayout, pControlTextBrush);
                         if (isFocused && (GetTickCount64() % 1000) < 500) {
                             DWRITE_HIT_TEST_METRICS hmCaret;
                             float cX = 0, cY = 0;
-                            pInputLayout->HitTestTextPosition((UINT32)displayVal.length(), FALSE, &cX, &cY, &hmCaret);
+                            int safeCaret = min(max(input.caretPos, 0), (int)displayVal.length());
+                            pInputLayout->HitTestTextPosition(safeCaret, FALSE, &cX, &cY, &hmCaret);
                             pRT->DrawLine(
                                 D2D1::Point2F(r.left + 2.0f + cX, r.top + 2.0f),
                                 D2D1::Point2F(r.left + 2.0f + cX, r.bottom - 2.0f),
@@ -821,25 +990,35 @@ void Render(HWND hwnd) {
             if (actualCount > 0) {
                 std::vector<DWRITE_HIT_TEST_METRICS> hitMetrics(actualCount);
                 pTextLayout->HitTestTextRange(link.start, link.length, 0, 0, hitMetrics.data(), actualCount, &actualCount);
+                float linkOffsetY = 6.0f;
                 for (UINT32 i = 0; i < actualCount; ++i) {
                     D2D1_RECT_F rect = D2D1::RectF(
-                        10.0f + hitMetrics[i].left - 2.0f, 10.0f - g_ScrollY + hitMetrics[i].top - 2.0f,
-                        10.0f + hitMetrics[i].left + hitMetrics[i].width + 2.0f, 10.0f - g_ScrollY + hitMetrics[i].top + hitMetrics[i].height + 2.0f
+                        10.0f + hitMetrics[i].left - 2.0f, 10.0f - g_ScrollY + hitMetrics[i].top - 2.0f + linkOffsetY,
+                        10.0f + hitMetrics[i].left + hitMetrics[i].width + 2.0f, 10.0f - g_ScrollY + hitMetrics[i].top + hitMetrics[i].height - 2.0f + linkOffsetY
                     );
                     pRT->DrawRectangle(rect, pFocusBrush, 2.0f);
                 }
             }
         }
     }
-    std::string displayUrl = "";
-    if (g_IsHoveringLink && !g_HoveredUrl.empty()) displayUrl = g_HoveredUrl;
-    else if (g_FocusIndex >= 0 && g_FocusIndex < (int)g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::LINK) {
-        displayUrl = g_Links[g_FocusItems[g_FocusIndex].index].url;
+
+    // --- ステータスバー（メッセージまたはURL）の描画 ---
+    std::wstring statusText = L"";
+    if (!g_StatusMessage.empty()) {
+        statusText = g_StatusMessage;
     }
-    if (!displayUrl.empty()) {
-        std::wstring wUrl = NarrowToWide(displayUrl);
+    else {
+        std::string displayUrl = "";
+        if (g_IsHoveringLink && !g_HoveredUrl.empty()) displayUrl = g_HoveredUrl;
+        else if (g_FocusIndex >= 0 && g_FocusIndex < (int)g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::LINK) {
+            displayUrl = g_Links[g_FocusItems[g_FocusIndex].index].url;
+        }
+        if (!displayUrl.empty()) statusText = NarrowToWide(displayUrl);
+    }
+
+    if (!statusText.empty()) {
         IDWriteTextLayout* pStatusLayout = nullptr;
-        pDWriteFactory->CreateTextLayout(wUrl.c_str(), (UINT32)wUrl.length(),
+        pDWriteFactory->CreateTextLayout(statusText.c_str(), (UINT32)statusText.length(),
             pTextFormat, pRT->GetSize().width - 10.0f, 100.0f, &pStatusLayout);
         if (pStatusLayout) {
             pStatusLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -855,6 +1034,7 @@ void Render(HWND hwnd) {
     }
     pRT->EndDraw();
 }
+
 UINT32 GetTextPositionFromMouse(int mouseX, int mouseY, BOOL* outIsInside = nullptr) {
     if (!pTextLayout) {
         if (outIsInside) *outIsInside = FALSE;
@@ -868,11 +1048,13 @@ UINT32 GetTextPositionFromMouse(int mouseX, int mouseY, BOOL* outIsInside = null
     if (outIsInside) *outIsInside = isInside;
     return metrics.textPosition + (isTrailingHit ? 1 : 0);
 }
+
 void UpdateScrollPos(HWND hwnd, float newY) {
     g_ScrollY = max(0.0f, min(newY, g_MaxScrollY));
     SetScrollPos(hwnd, SB_VERT, (int)g_ScrollY, TRUE);
     InvalidateRect(hwnd, NULL, FALSE);
 }
+
 void UpdateImePosition(HWND hwnd) {
     std::lock_guard<std::mutex> lock(g_ContentMutex);
     if (g_FocusIndex < 0 || g_FocusIndex >= g_FocusItems.size() || g_FocusItems[g_FocusIndex].type != FocusType::INPUT) return;
@@ -887,13 +1069,15 @@ void UpdateImePosition(HWND hwnd) {
         pInputLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         DWRITE_HIT_TEST_METRICS hmCaret;
         float cY = 0;
-        pInputLayout->HitTestTextPosition((UINT32)displayVal.length(), FALSE, &cX, &cY, &hmCaret);
+        int safeCaret = min(max(input.caretPos, 0), (int)displayVal.length());
+        pInputLayout->HitTestTextPosition(safeCaret, FALSE, &cX, &cY, &hmCaret);
         pInputLayout->Release();
     }
+    float textOffsetY = -4.0f;
     COMPOSITIONFORM cf = { 0 };
     cf.dwStyle = CFS_POINT;
     cf.ptCurrentPos.x = (LONG)(input.rect.left + 2.0f + cX);
-    cf.ptCurrentPos.y = (LONG)(input.rect.top + 2.0f - g_ScrollY);
+    cf.ptCurrentPos.y = (LONG)(input.rect.top + textOffsetY + 2.0f - g_ScrollY);
     ImmSetCompositionWindow(hImc, &cf);
     LOGFONTW lf = { 0 };
     if (g_hCustomFont) {
@@ -905,6 +1089,32 @@ void UpdateImePosition(HWND hwnd) {
     ImmSetCompositionFontW(hImc, &lf);
     ImmReleaseContext(hwnd, hImc);
 }
+
+int GetInputPositionFromMouse(const FormInput& input, float mouseX, float mouseY) {
+    if (!pDWriteFactory || !pTextFormat) return 0;
+    std::wstring displayVal = (input.type == L"password") ? std::wstring(input.value.length(), L'*') : input.value;
+    IDWriteTextLayout* pInputLayout = nullptr;
+    if (SUCCEEDED(pDWriteFactory->CreateTextLayout(displayVal.c_str(), (UINT32)displayVal.length(), pTextFormat, input.rect.right - input.rect.left - 4.0f, input.rect.bottom - input.rect.top, &pInputLayout))) {
+        pInputLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        BOOL isTrailingHit = FALSE, isInside = FALSE;
+        DWRITE_HIT_TEST_METRICS metrics = { 0 };
+        float textOffsetY = -4.0f;
+        pInputLayout->HitTestPoint(mouseX - (input.rect.left + 2.0f), mouseY - (input.rect.top + textOffsetY), &isTrailingHit, &isInside, &metrics);        pInputLayout->Release();
+        return metrics.textPosition + (isTrailingHit ? 1 : 0);
+    }
+    return 0;
+}
+
+void DeleteInputSelection(FormInput& input) {
+    if (input.caretPos != input.selAnchor) {
+        int start = min(input.caretPos, input.selAnchor);
+        int end = max(input.caretPos, input.selAnchor);
+        input.value.erase(start, end - start);
+        input.caretPos = start;
+        input.selAnchor = start;
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CONTENT_LOADED:
@@ -930,6 +1140,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_SelectionStart = 0;
         g_SelectionLength = 0;
         g_FocusIndex = -1;
+        g_IsInputSelecting = false;
         if (g_IsSearching) {
             ShowWindow(g_hSearchEdit, SW_HIDE);
             g_IsSearching = false;
@@ -974,6 +1185,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
                 auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
                 if (input.type == L"text" || input.type == L"password") InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
+        if (wp == TIMER_STATUS) { // ステータスメッセージを消す処理
+            if (GetTickCount64() - g_StatusMessageTime >= 3000) {
+                g_StatusMessage = L"";
+                KillTimer(hwnd, TIMER_STATUS);
+                InvalidateRect(hwnd, NULL, FALSE);
             }
         }
         return 0;
@@ -1176,13 +1394,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             g_FocusIndex = (int)f; break;
                         }
                     }
-                    if (input.type == L"checkbox") input.checked = !input.checked;
-                    else if (input.type == L"radio") {
-                        input.checked = true;
-                        for (auto& other : g_Inputs) {
-                            if (&other != &input && other.type == L"radio" && other.name == input.name) other.checked = false;
-                        }
+
+                    if (input.type == L"text" || input.type == L"password") {
+                        int pos = GetInputPositionFromMouse(input, mouseX, docY);
+                        input.caretPos = pos;
+                        input.selAnchor = pos;
+                        g_IsInputSelecting = true;
+                        SetCapture(hwnd);
                     }
+                    else if (input.type == L"checkbox") input.checked = !input.checked;
+                    else if (input.type == L"radio") { /* 既存のラジオ処理 */ }
                     else if (input.type == L"button" || input.type == L"submit" || input.type == L"reset") {
                         PostMessage(hwnd, WM_SUBMIT_FORM, 0, 0);
                     }
@@ -1205,6 +1426,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE:
     {
+        if (g_IsInputSelecting) {
+            float mouseX = (float)GET_X_LPARAM(lp);
+            float mouseY = (float)GET_Y_LPARAM(lp);
+            float docY = mouseY + g_ScrollY;
+            std::lock_guard<std::mutex> lock(g_ContentMutex);
+            if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+                auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+                if (input.type == L"text" || input.type == L"password") {
+                    input.caretPos = GetInputPositionFromMouse(input, mouseX, docY);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
+            return 0;
+        }
         BOOL isInside = FALSE;
         UINT32 currentPos = GetTextPositionFromMouse(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &isInside);
         bool foundLink = false;
@@ -1242,6 +1477,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return 0;
     case WM_LBUTTONUP:
+        if (g_IsInputSelecting) {
+            ReleaseCapture();
+            g_IsInputSelecting = false;
+            return 0;
+        }
         if (g_IsSelecting) {
             KillTimer(hwnd, TIMER_AUTOSCROLL); ReleaseCapture(); g_IsSelecting = false;
             if (g_SelectionLength == 0 && g_IsHoveringLink && !g_HoveredUrl.empty()) NavigateTo(hwnd, g_HoveredUrl);
@@ -1251,42 +1491,63 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         UpdateImePosition(hwnd);
         return DefWindowProc(hwnd, msg, wp, lp);
     case WM_CHAR:
+    {
         if (g_IsSearching) return 0;
-        if (wp == '/') {
-            if (!g_hSearchEdit) {
-                g_hSearchEdit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
-                    0, 0, 0, 0, hwnd, (HMENU)999, GetModuleHandle(NULL), NULL);
-                if (g_hCustomFont) SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)g_hCustomFont, TRUE);
-                else SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-                g_OldSearchEditProc = (WNDPROC)SetWindowLongPtr(g_hSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditSubclassProc);
-            }
-            g_IsUrlMode = false;
-            RECT rc; GetClientRect(hwnd, &rc);
-            int editHeight = CUSTOM_FONT_SIZE + 6;
-            MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
-            SetWindowText(g_hSearchEdit, g_LastSearchQuery.c_str());
-            SendMessage(g_hSearchEdit, EM_SETSEL, 0, -1);
-            ShowWindow(g_hSearchEdit, SW_SHOW); SetFocus(g_hSearchEdit);
-            g_IsSearching = true;
-            return 0;
-        }
-        if (wp == 'n') { PostMessage(hwnd, WM_EXECUTE_SEARCH, 1, 0); return 0; }
-        if (wp == 'N') { PostMessage(hwnd, WM_EXECUTE_SEARCH, 0, 0); return 0; }
+        bool isTextInputActive = false;
         if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+            auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+            if (input.type == L"text" || input.type == L"password") {
+                isTextInputActive = true;
+            }
+        }
+        if (!isTextInputActive) {
+            if (wp == '/') {
+                if (!g_hSearchEdit) {
+                    g_hSearchEdit = CreateWindowEx(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+                        0, 0, 0, 0, hwnd, (HMENU)999, GetModuleHandle(NULL), NULL);
+                    if (g_hCustomFont) SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)g_hCustomFont, TRUE);
+                    else SendMessage(g_hSearchEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+                    g_OldSearchEditProc = (WNDPROC)SetWindowLongPtr(g_hSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditSubclassProc);
+                }
+                g_IsUrlMode = false;
+                RECT rc; GetClientRect(hwnd, &rc);
+                int editHeight = CUSTOM_FONT_SIZE + 6;
+                MoveWindow(g_hSearchEdit, 0, rc.bottom - editHeight, rc.right, editHeight, TRUE);
+                SetWindowText(g_hSearchEdit, g_LastSearchQuery.c_str());
+                SendMessage(g_hSearchEdit, EM_SETSEL, 0, -1);
+                ShowWindow(g_hSearchEdit, SW_SHOW); SetFocus(g_hSearchEdit);
+                g_IsSearching = true;
+                return 0;
+            }
+            if (wp == 'n') { PostMessage(hwnd, WM_EXECUTE_SEARCH, 1, 0); return 0; }
+            if (wp == 'N') { PostMessage(hwnd, WM_EXECUTE_SEARCH, 0, 0); return 0; }
+        }
+        if (isTextInputActive) {
             std::lock_guard<std::mutex> lock(g_ContentMutex);
             auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
             if (input.type != L"button" && input.type != L"submit" && input.type != L"reset" && input.type != L"radio" && input.type != L"checkbox") {
                 if (wp == '\b') {
-                    if (!input.value.empty()) input.value.pop_back();
+                    if (input.caretPos != input.selAnchor) {
+                        DeleteInputSelection(input);
+                    }
+                    else if (input.caretPos > 0) {
+                        input.value.erase(input.caretPos - 1, 1);
+                        input.caretPos--;
+                        input.selAnchor = input.caretPos;
+                    }
                 }
                 else if (wp >= 32) {
-                    input.value += (wchar_t)wp;
+                    DeleteInputSelection(input);
+                    input.value.insert(input.caretPos, 1, (wchar_t)wp);
+                    input.caretPos++;
+                    input.selAnchor = input.caretPos;
                 }
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
         }
         break;
+    }
     case WM_SYSKEYDOWN:
         if (HandleGlobalShortcuts(hwnd, msg, wp)) return 0;
         return DefWindowProc(hwnd, msg, wp, lp);
@@ -1348,6 +1609,55 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
                 if (input.type == L"text" || input.type == L"password") {
                     isTextInputActive = true;
+                    bool shift = GetKeyState(VK_SHIFT) & 0x8000;
+                    bool handled = false;
+                    std::lock_guard<std::mutex> lock(g_ContentMutex);
+                    if (wp == VK_LEFT) {
+                        if (!shift && input.caretPos != input.selAnchor) {
+                            input.caretPos = min(input.caretPos, input.selAnchor);
+                            input.selAnchor = input.caretPos;
+                        }
+                        else if (input.caretPos > 0) {
+                            input.caretPos--;
+                            if (!shift) input.selAnchor = input.caretPos;
+                        }
+                        handled = true;
+                    }
+                    else if (wp == VK_RIGHT) {
+                        if (!shift && input.caretPos != input.selAnchor) {
+                            input.caretPos = max(input.caretPos, input.selAnchor);
+                            input.selAnchor = input.caretPos;
+                        }
+                        else if (input.caretPos < (int)input.value.length()) {
+                            input.caretPos++;
+                            if (!shift) input.selAnchor = input.caretPos;
+                        }
+                        handled = true;
+                    }
+                    else if (wp == VK_HOME) {
+                        input.caretPos = 0;
+                        if (!shift) input.selAnchor = input.caretPos;
+                        handled = true;
+                    }
+                    else if (wp == VK_END) {
+                        input.caretPos = (int)input.value.length();
+                        if (!shift) input.selAnchor = input.caretPos;
+                        handled = true;
+                    }
+                    else if (wp == VK_DELETE) {
+                        if (input.caretPos != input.selAnchor) {
+                            DeleteInputSelection(input);
+                        }
+                        else if (input.caretPos < (int)input.value.length()) {
+                            input.value.erase(input.caretPos, 1);
+                        }
+                        handled = true;
+                    }
+
+                    if (handled) {
+                        InvalidateRect(hwnd, NULL, FALSE);
+                        return 0;
+                    }
                 }
             }
             switch (wp) {
@@ -1389,7 +1699,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProc(hwnd, msg, wp, lp);
 }
+
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR pCmdLine, int n) {
+    InitAppDir();
+    LoadBookmarks();
+
     curl_global_init(CURL_GLOBAL_ALL);
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &pD2DFactory);
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&pDWriteFactory);
