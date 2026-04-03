@@ -432,7 +432,7 @@ ParsedPage FetchAndStripHTML(const std::string& url, const std::string& postData
             L"<b>Ctrl + C</b> : 選択中のテキストをクリップボードにコピー<br>"
             L"<b>q</b> : ブラウザを終了する<br><br>"
             L"<hr><br>"
-            L"t2t(v1.0.4)"
+            L"t2t(v1.0.5)"
             L"</body></html>";
     }
     else {
