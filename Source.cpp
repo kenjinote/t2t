@@ -864,7 +864,7 @@ void UpdateLayoutAndScrollbar(HWND hwnd) {
 void Render(HWND hwnd) {
     EnsureResources(hwnd);
     pRT->BeginDraw();
-    pRT->Clear(D2D1::ColorF(0.05f, 0.05f, 0.05f));
+    pRT->Clear(D2D1::ColorF(0.00f, 0.00f, 0.00f));
     if (pTextLayout) {
         if (g_SelectionLength > 0) {
             UINT32 actualCount = 0;
