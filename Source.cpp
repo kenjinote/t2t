@@ -114,6 +114,7 @@ UINT32 g_SelectionLength = 0;
 bool g_IsSelecting = false;
 bool g_IsInputSelecting = false;
 bool g_IsHoveringLink = false;
+bool g_IsHoveringClickableControl = false;
 std::string g_HoveredUrl = "";
 std::vector<std::string> g_History;
 int g_HistoryIndex = -1;
@@ -873,8 +874,10 @@ void Render(HWND hwnd) {
                 pTextLayout->HitTestTextRange(g_SelectionStart, g_SelectionLength, 0, 0, hitMetrics.data(), actualCount, &actualCount);
                 for (UINT32 i = 0; i < actualCount; ++i) {
                     D2D1_RECT_F rect = D2D1::RectF(
-                        10.0f + hitMetrics[i].left, 10.0f - g_ScrollY + hitMetrics[i].top,
-                        10.0f + hitMetrics[i].left + hitMetrics[i].width, 10.0f - g_ScrollY + hitMetrics[i].top + hitMetrics[i].height
+                        10.0f + hitMetrics[i].left,
+                        10.0f - g_ScrollY + hitMetrics[i].top + 3.0f,
+                        10.0f + hitMetrics[i].left + hitMetrics[i].width,
+                        10.0f - g_ScrollY + hitMetrics[i].top + hitMetrics[i].height + 3.0f
                     );
                     pRT->FillRectangle(rect, pSelectionBrush);
                 }
@@ -937,8 +940,10 @@ void Render(HWND hwnd) {
                                 pInputLayout->HitTestTextRange(selStart, selLen, 0, 0, hitMetrics.data(), actualCount, &actualCount);
                                 for (UINT32 j = 0; j < actualCount; ++j) {
                                     D2D1_RECT_F sRect = D2D1::RectF(
-                                        r.left + 2.0f + hitMetrics[j].left, r.top + textOffsetY + hitMetrics[j].top,
-                                        r.left + 2.0f + hitMetrics[j].left + hitMetrics[j].width, r.top + textOffsetY + hitMetrics[j].top + hitMetrics[j].height
+                                        r.left + 2.0f + hitMetrics[j].left,
+                                        r.top + textOffsetY + hitMetrics[j].top + 3.0f,
+                                        r.left + 2.0f + hitMetrics[j].left + hitMetrics[j].width,
+                                        r.top + textOffsetY + hitMetrics[j].top + hitMetrics[j].height + 3.0f
                                     );
                                     pRT->FillRectangle(sRect, pSelectionBrush);
                                 }
@@ -1141,6 +1146,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_SelectionLength = 0;
         g_FocusIndex = -1;
         g_IsInputSelecting = false;
+        g_IsHoveringClickableControl = false;
         if (g_IsSearching) {
             ShowWindow(g_hSearchEdit, SW_HIDE);
             g_IsSearching = false;
@@ -1346,7 +1352,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
-            SetCursor(LoadCursor(NULL, g_IsHoveringLink ? IDC_HAND : IDC_IBEAM));
+            SetCursor(LoadCursor(NULL, (g_IsHoveringLink || g_IsHoveringClickableControl) ? IDC_HAND : IDC_IBEAM));
             return TRUE;
         }
         break;
@@ -1448,12 +1454,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         float mouseY = (float)GET_Y_LPARAM(lp);
         float docY = mouseY + g_ScrollY;
         bool hoverControl = false;
+        bool hoverClickableControl = false;
         {
             std::lock_guard<std::mutex> lock(g_ContentMutex);
             for (const auto& input : g_Inputs) {
                 if (input.type == L"hidden") continue;
                 if (mouseX >= input.rect.left && mouseX <= input.rect.right && docY >= input.rect.top && docY <= input.rect.bottom) {
-                    hoverControl = true; break;
+                    hoverControl = true;
+                    if (input.type == L"button" || input.type == L"submit" || input.type == L"reset" || input.type == L"checkbox" || input.type == L"radio") {
+                        hoverClickableControl = true;
+                    }
+                    break;
                 }
             }
             if (isInside && currentPos != UINT32_MAX && !g_IsSelecting && !hoverControl) {
@@ -1464,9 +1475,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
         }
+        bool cursorChanged = false;
+        if (g_IsHoveringClickableControl != hoverClickableControl) {
+            g_IsHoveringClickableControl = hoverClickableControl;
+            cursorChanged = true;
+        }
         if (g_IsHoveringLink != foundLink || (foundLink && g_HoveredUrl != targetUrl)) {
-            g_IsHoveringLink = foundLink; g_HoveredUrl = targetUrl;
-            SetCursor(LoadCursor(NULL, g_IsHoveringLink ? IDC_HAND : IDC_IBEAM));
+            g_IsHoveringLink = foundLink;
+            g_HoveredUrl = targetUrl;
+            cursorChanged = true;
+        }
+        if (cursorChanged) {
+            SetCursor(LoadCursor(NULL, (g_IsHoveringLink || g_IsHoveringClickableControl) ? IDC_HAND : IDC_IBEAM));
             InvalidateRect(hwnd, NULL, FALSE);
         }
         if (g_IsSelecting && currentPos != UINT32_MAX && g_SelectionAnchor != UINT32_MAX) {
