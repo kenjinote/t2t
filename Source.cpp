@@ -751,6 +751,25 @@ void CopyToClipboard(HWND hwnd) {
     }
 }
 
+void CopyInputToClipboard(HWND hwnd, const FormInput& input) {
+    if (input.caretPos == input.selAnchor) return;
+
+    int start = min(input.caretPos, input.selAnchor);
+    int end = max(input.caretPos, input.selAnchor);
+    std::wstring textToCopy = input.value.substr(start, end - start);
+
+    if (!textToCopy.empty() && OpenClipboard(hwnd)) {
+        EmptyClipboard();
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (textToCopy.length() + 1) * sizeof(wchar_t));
+        if (hMem) {
+            memcpy(GlobalLock(hMem), textToCopy.c_str(), (textToCopy.length() + 1) * sizeof(wchar_t));
+            GlobalUnlock(hMem);
+            SetClipboardData(CF_UNICODETEXT, hMem);
+        }
+        CloseClipboard();
+    }
+}
+
 void EnsureResources(HWND hwnd) {
     if (!pRT) {
         RECT rc; GetClientRect(hwnd, &rc);
@@ -1118,6 +1137,45 @@ void DeleteInputSelection(FormInput& input) {
         input.caretPos = start;
         input.selAnchor = start;
     }
+}
+
+void PasteFromClipboard(HWND hwnd) {
+    std::lock_guard<std::mutex> lock(g_ContentMutex);
+
+    // フォーカスがテキストボックスにあるか確認
+    if (g_FocusIndex < 0 || g_FocusIndex >= g_FocusItems.size()) return;
+    if (g_FocusItems[g_FocusIndex].type != FocusType::INPUT) return;
+
+    auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+    if (input.type != L"text" && input.type != L"password") return;
+
+    if (!OpenClipboard(hwnd)) return;
+
+    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+    if (hData != nullptr) {
+        wchar_t* pszText = static_cast<wchar_t*>(GlobalLock(hData));
+        if (pszText != nullptr) {
+            std::wstring pasteText = pszText;
+            GlobalUnlock(hData);
+
+            // 単一行入力のため、改行コード(\r, \n)を取り除く
+            pasteText.erase(std::remove(pasteText.begin(), pasteText.end(), L'\r'), pasteText.end());
+            pasteText.erase(std::remove(pasteText.begin(), pasteText.end(), L'\n'), pasteText.end());
+
+            // 選択範囲があれば削除
+            if (input.caretPos != input.selAnchor) {
+                DeleteInputSelection(input);
+            }
+
+            // テキストを挿入してキャレットを進める
+            input.value.insert(input.caretPos, pasteText);
+            input.caretPos += static_cast<int>(pasteText.length());
+            input.selAnchor = input.caretPos;
+
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+    }
+    CloseClipboard();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1587,7 +1645,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_SelectionStart = 0; g_SelectionLength = (UINT32)g_WebPageContent.length();
             InvalidateRect(hwnd, NULL, FALSE); return 0;
         }
-        if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) { CopyToClipboard(hwnd); return 0; }
+        if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            bool isInputCopied = false;
+            {
+                std::lock_guard<std::mutex> lock(g_ContentMutex);
+                if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+                    auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+                    if ((input.type == L"text" || input.type == L"password") && input.caretPos != input.selAnchor) {
+                        CopyInputToClipboard(hwnd, input);
+                        isInputCopied = true;
+                    }
+                }
+            }
+            // テキストボックスの選択をコピーしなかった場合は、Webページ上の選択テキストをコピー
+            if (!isInputCopied) {
+                CopyToClipboard(hwnd);
+            }
+            return 0;
+        }
+        if (wp == 'X' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            std::lock_guard<std::mutex> lock(g_ContentMutex);
+            if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size() && g_FocusItems[g_FocusIndex].type == FocusType::INPUT) {
+                auto& input = g_Inputs[g_FocusItems[g_FocusIndex].index];
+                if ((input.type == L"text" || input.type == L"password") && input.caretPos != input.selAnchor) {
+                    CopyInputToClipboard(hwnd, input); // クリップボードにコピー
+                    DeleteInputSelection(input);       // 選択範囲を削除
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
+            return 0;
+        }
+        if (wp == 'V' && (GetKeyState(VK_CONTROL) & 0x8000)) { PasteFromClipboard(hwnd); return 0; }
+        if (wp == VK_INSERT && (GetKeyState(VK_SHIFT) & 0x8000)) { PasteFromClipboard(hwnd); return 0; }
         if (wp == VK_TAB) { PostMessage(hwnd, WM_DO_TAB, (GetKeyState(VK_SHIFT) & 0x8000) ? 1 : 0, 0); return 0; }
         if (wp == VK_RETURN) {
             if (g_FocusIndex >= 0 && g_FocusIndex < g_FocusItems.size()) {
